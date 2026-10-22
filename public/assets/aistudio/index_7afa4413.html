@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>CarNav</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+*{-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#000;color:#fff;font-family:sans-serif;overflow:hidden}
+#wrap{position:absolute;left:0;right:0;top:0;bottom:84px}
+#map{position:absolute;left:0;right:0;top:0;bottom:0;background:#111}
+button{font-size:24px;font-weight:bold;color:#fff;background:#2a2a2a;border:2px solid #777;border-radius:8px;min-width:72px;height:68px;margin:0 6px}
+#gps{position:absolute;left:10px;top:10px;z-index:1000;background:#000;border:2px solid #555;padding:8px 12px;font-size:22px}
+#side{position:absolute;right:10px;top:10px;z-index:1000}
+#side button{display:block;margin:0 0 10px 0;width:72px}
+#bar{position:absolute;left:0;right:0;bottom:0;height:84px;background:#000;border-top:2px solid #444}
+.grp{display:flex;align-items:center;height:100%}
+#bm{width:100%}#bp{width:100%}
+#info{flex:1;min-width:0;padding:0 8px}
+#i1{font-size:28px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#i2{font-size:16px;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#bp .t{flex:1;font-size:24px;padding:0 10px}
+#cross{display:none;position:absolute;left:50%;top:50%;width:44px;height:44px;margin:-22px 0 0 -22px;z-index:1000;pointer-events:none;border:4px solid #f33;border-radius:50%;box-sizing:border-box}
+.pin{width:20px;height:20px;border:4px solid #fff;border-radius:50%;background:#f33}
+#srch{display:none;position:fixed;left:0;right:0;top:0;bottom:0;background:#111;z-index:2000}
+#qrow{display:flex;padding:8px;height:68px}
+#q{flex:1;min-width:0;font-size:28px;height:64px;box-sizing:border-box;padding:0 12px;background:#000;color:#fff;border:2px solid #777}
+#res{position:absolute;top:84px;bottom:0;left:0;right:0;overflow-y:auto}
+.row{padding:10px 16px;border-bottom:1px solid #333;min-height:60px}
+.t{font-size:26px}.s{font-size:18px;color:#aaa}
+.msg{padding:20px;font-size:24px;color:#aaa}
+#arr{display:block}
+</style></head><body>
+<div id="wrap">
+ <div id="map"></div>
+ <div id="gps">GPS: waiting...</div>
+ <div id="side"><button id="zi">+</button><button id="zo">-</button><button id="ctr">ME</button><button id="dn">D/N</button></div>
+ <div id="cross"></div>
+</div>
+<div id="bar">
+ <div id="bm" class="grp">
+  <button id="sb">SEARCH</button><button id="pb">PIN</button>
+  <div id="info"><div id="i1">Tap SEARCH to choose a destination</div><div id="i2"></div></div>
+  <button id="clr" style="display:none">CLEAR</button>
+ </div>
+ <div id="bp" class="grp" style="display:none"><div class="t">Move the map to the spot</div><button id="set">SET HERE</button><button id="pc">CANCEL</button></div>
+</div>
+<div id="srch">
+ <div id="qrow"><input id="q" type="text" autocomplete="off" autocapitalize="off" placeholder="Where to?"><button id="qc">CANCEL</button></div>
+ <div id="res"></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(function(){
+var GEO='https://photon.komoot.io/api/', ROUTE='https://router.project-osrm.org/route/v1/driving/';
+var BBOX='2.6,4.2,14.7,13.9'; // Nigeria; change if you drive elsewhere
+var $=function(id){return document.getElementById(id)};
+if(typeof L==='undefined'){document.body.innerHTML='<p style="font-size:28px;padding:20px">Map library failed to load. Check data connection and reload.</p>';return}
+
+var map=L.map('map',{zoomControl:false,fadeAnimation:false,zoomAnimation:false,markerZoomAnimation:false,inertia:false}).setView([6.5244,3.3792],15);
+var night=true;try{night=localStorage.getItem('night')!=='0'}catch(e){}
+var tiles=null;
+function setTiles(){
+ if(tiles)map.removeLayer(tiles);
+ tiles=L.tileLayer('https://{s}.basemaps.cartocdn.com/'+(night?'dark_all':'light_all')+'/{z}/{x}/{y}.png',
+  {subdomains:'abcd',maxZoom:18,updateWhenIdle:true,updateWhenZooming:false,keepBuffer:1,attribution:'&copy; OpenStreetMap &copy; CARTO'}).addTo(map);
+}
+setTiles();
+
+var me=L.marker([6.5244,3.3792],{interactive:false,keyboard:false,icon:L.divIcon({className:'',iconSize:[44,44],iconAnchor:[22,22],
+ html:'<svg id="arr" width="44" height="44" viewBox="0 0 44 44"><polygon points="22,3 38,40 22,32 6,40" fill="#0af" stroke="#fff" stroke-width="3"/></svg>'})}).addTo(map);
+
+var fix=null,follow=true,first=false,lastPan=0,speed=0,userT=null;
+function recenter(){follow=true;$('ctr').style.background='';if(fix)map.setView([fix.lat,fix.lng],map.getZoom(),{animate:false})}
+function unfollow(){follow=false;$('ctr').style.background='#a60'}
+function later(){clearTimeout(userT);userT=setTimeout(function(){if(speed>1.5)recenter()},12000)}
+
+navigator.geolocation.watchPosition(function(p){
+ var c=p.coords,ll=[c.latitude,c.longitude];
+ fix={lat:c.latitude,lng:c.longitude};speed=c.speed||0;
+ me.setLatLng(ll);
+ if(speed>1.5&&c.heading!=null&&!isNaN(c.heading))$('arr').style.transform='rotate('+c.heading+'deg)';
+ $('gps').textContent='GPS '+Math.round(c.accuracy)+' m   '+Math.round(speed*3.6)+' km/h';
+ var now=Date.now();
+ if(!first){first=true;map.setView(ll,16,{animate:false})}
+ else if(follow&&now-lastPan>1500){lastPan=now;map.panTo(ll,{animate:false})}
+},function(e){$('gps').textContent='GPS error: '+e.message},{enableHighAccuracy:true,maximumAge:0,timeout:20000});
+
+map.on('dragstart',function(){unfollow();clearTimeout(userT)});
+map.on('dragend',later);
+$('zi').onclick=function(){map.zoomIn()};
+$('zo').onclick=function(){map.zoomOut()};
+$('ctr').onclick=recenter;
+$('dn').onclick=function(){night=!night;try{localStorage.setItem('night',night?'1':'0')}catch(e){}setTiles()};
+
+function getJSON(url,ms){
+ var ctl=new AbortController(),t=setTimeout(function(){ctl.abort()},ms);
+ return fetch(url,{signal:ctl.signal}).then(function(r){clearTimeout(t);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()},function(e){clearTimeout(t);throw e});
+}
+function two(n){return n<10?'0'+n:''+n}
+function fmt(s){var m=Math.round(s/60);return m<60?m+' min':Math.floor(m/60)+' h '+two(m%60)+' min'}
+function dist(a,b,c,d){var r=Math.PI/180,x=(c-a)*r,y=(d-b)*r,h=Math.sin(x/2)*Math.sin(x/2)+Math.cos(a*r)*Math.cos(c*r)*Math.sin(y/2)*Math.sin(y/2);return 12742*Math.asin(Math.sqrt(h))}
+function km(v){return v<10?v.toFixed(1):''+Math.round(v)}
+function decode(s){var i=0,la=0,lo=0,out=[];while(i<s.length){var b,sh=0,r=0;do{b=s.charCodeAt(i++)-63;r|=(b&31)<<sh;sh+=5}while(b>=32);la+=(r&1)?~(r>>1):(r>>1);sh=0;r=0;do{b=s.charCodeAt(i++)-63;r|=(b&31)<<sh;sh+=5}while(b>=32);lo+=(r&1)?~(r>>1):(r>>1);out.push([la/1e5,lo/1e5])}return out}
+function info(a,b){$('i1').textContent=a;$('i2').textContent=b||''}
+
+// ---- search ----
+var rid=0,tm=null;
+function openSearch(){$('srch').style.display='block';$('q').value='';$('res').innerHTML='';$('q').focus()}
+function closeSearch(){$('srch').style.display='none';$('q').blur()}
+$('sb').onclick=openSearch;$('qc').onclick=closeSearch;
+$('q').addEventListener('input',function(){clearTimeout(tm);var q=this.value.trim();if(q.length<3)return;tm=setTimeout(function(){find(q)},500)});
+$('q').addEventListener('keydown',function(e){if(e.keyCode===13){clearTimeout(tm);var q=this.value.trim();if(q.length>1)find(q)}});
+function label(p){
+ var title=p.name||[p.housenumber,p.street].filter(Boolean).join(' ')||p.city||p.state||'Unnamed place',parts=[];
+ [p.street,p.district,p.city||p.county,p.state].forEach(function(x){if(x&&x!==title&&parts.indexOf(x)<0)parts.push(x)});
+ return {title:title,sub:parts.join(', ')};
+}
+function find(q){
+ var id=++rid,u=GEO+'?limit=7&bbox='+BBOX+'&q='+encodeURIComponent(q);
+ if(fix)u+='&lat='+fix.lat+'&lon='+fix.lng;
+ $('res').innerHTML='<div class="msg">Searching...</div>';
+ getJSON(u,10000).then(function(j){if(id===rid)show(j.features||[])}).catch(function(e){if(id===rid)$('res').innerHTML='<div class="msg">Search failed ('+e.message+'). Check data connection.</div>'});
+}
+function show(fs){
+ var box=$('res');box.innerHTML='';
+ if(!fs.length){box.innerHTML='<div class="msg">No results. Try another spelling, or use PIN.</div>';return}
+ fs.forEach(function(f){
+  var g=f.geometry.coordinates,t=label(f.properties),d=document.createElement('div'),a=document.createElement('div'),b=document.createElement('div');
+  d.className='row';a.className='t';b.className='s';
+  a.textContent=t.title;b.textContent=t.sub+(fix?'  |  '+km(dist(fix.lat,fix.lng,g[1],g[0]))+' km away':'');
+  d.appendChild(a);d.appendChild(b);
+  d.onclick=function(){closeSearch();setDest(g[1],g[0],t.title)};
+  box.appendChild(d);
+ });
+}
+
+// ---- pin on map ----
+function pinMode(on){$('cross').style.display=on?'block':'none';$('bm').style.display=on?'none':'flex';$('bp').style.display=on?'flex':'none';if(on){unfollow();clearTimeout(userT)}}
+$('pb').onclick=function(){pinMode(true)};
+$('pc').onclick=function(){pinMode(false)};
+$('set').onclick=function(){var c=map.getCenter();pinMode(false);setDest(c.lat,c.lng,'Dropped pin')};
+
+// ---- route ----
+var line=null,dmk=null,rr=0;
+function setDest(lat,lng,name){
+ if(!fix){info('Waiting for GPS fix...','');return}
+ if(dmk)map.removeLayer(dmk);
+ dmk=L.marker([lat,lng],{interactive:false,icon:L.divIcon({className:'',iconSize:[28,28],iconAnchor:[14,14],html:'<div class="pin"></div>'})}).addTo(map);
+ $('clr').style.display='';info('Finding route...',name);
+ var id=++rr;
+ getJSON(ROUTE+fix.lng+','+fix.lat+';'+lng+','+lat+'?overview=full&geometries=polyline&alternatives=false',15000).then(function(j){
+  if(id!==rr)return;
+  if(j.code!=='Ok'||!j.routes||!j.routes.length)throw new Error('no route found');
+  var r=j.routes[0];
+  if(line)map.removeLayer(line);
+  line=L.polyline(decode(r.geometry),{color:'#0af',weight:8,opacity:0.9,smoothFactor:2,interactive:false}).addTo(map);
+  unfollow();map.fitBounds(line.getBounds(),{padding:[60,60],animate:false});later();
+  var e=new Date(Date.now()+r.duration*1000);
+  info(km(r.distance/1000)+' km  |  '+fmt(r.duration)+'  |  ETA '+two(e.getHours())+':'+two(e.getMinutes()),name+' - free-flow estimate, no live traffic yet');
+ }).catch(function(e){if(id===rr)info('Route failed: '+e.message,'Check connection and try again')});
+}
+$('clr').onclick=function(){rr++;if(line){map.removeLayer(line);line=null}if(dmk){map.removeLayer(dmk);dmk=null}$('clr').style.display='none';info('Tap SEARCH to choose a destination','');recenter()};
+})();
+</script></body></html>

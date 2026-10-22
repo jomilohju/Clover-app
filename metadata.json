@@ -1,0 +1,6 @@
+{
+  "name": "CarNav - Turn-by-Turn GPS Navigation",
+  "description": "High-contrast browser GPS navigation with turn-by-turn guidance, voice prompts, off-route detection, and auto-rerouting.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

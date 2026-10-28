@@ -1,6 +1,4 @@
 import React from 'react';
-import { Navigation, Moon, Sun, MapPin } from 'lucide-react';
-import { formatDistance, formatDuration, formatEta } from '../utils/navigation';
 
 interface BottomNavHudProps {
   isNavigating: boolean;
@@ -10,12 +8,19 @@ interface BottomNavHudProps {
   eta: Date | null;
   nightMode: boolean;
   followCar: boolean;
+  isMuted: boolean;
   destinationName?: string;
+  onSearch: () => void;
+  onStartPinMode?: () => void;
+  onOpenHistory?: () => void;
+  onToggleNight?: () => void;
+  onToggleMute: () => void;
   onEndRoute: () => void;
-  onStartPinMode: () => void;
-  onToggleNight: () => void;
   onRecenter: () => void;
 }
+
+const two = (n: number) => (n < 10 ? '0' + n : '' + n);
+const fmtDist = (m: number) => (m < 1000 ? Math.round(m / 10) * 10 + ' m' : (m / 1000).toFixed(1) + ' km');
 
 export const BottomNavHud: React.FC<BottomNavHudProps> = ({
   isNavigating,
@@ -25,258 +30,197 @@ export const BottomNavHud: React.FC<BottomNavHudProps> = ({
   eta,
   nightMode,
   followCar,
+  isMuted,
   destinationName,
-  onEndRoute,
+  onSearch,
   onStartPinMode,
+  onOpenHistory,
   onToggleNight,
+  onToggleMute,
+  onEndRoute,
   onRecenter,
 }) => {
-  const displaySpeed = Math.round(speedKmh);
+  const mins = Math.max(1, Math.round(remainingDurationSeconds / 60));
 
-  if (isNavigating) {
-    return (
-      <footer
-        role="contentinfo"
-        className={`fixed bottom-0 left-0 right-0 z-1000 backdrop-blur-md border-t select-none transition-colors ${
-          nightMode
-            ? 'bg-neutral-950/95 border-neutral-700 text-white shadow-[0_-6px_16px_rgba(0,0,0,0.8)]'
-            : 'bg-white/95 border-slate-300 text-slate-900 shadow-[0_-6px_16px_rgba(0,0,0,0.12)]'
-        }`}
+  const cardStyle: React.CSSProperties = {
+    background: nightMode ? 'rgba(10, 10, 10, 0.95)' : 'rgba(255, 255, 255, 0.98)',
+    color: nightMode ? '#ffffff' : '#0f172a',
+    borderColor: nightMode ? '#404040' : '#cbd5e1',
+  };
+
+  const iconBtnStyle: React.CSSProperties = {
+    background: nightMode ? '#1e1e1e' : '#f1f5f9',
+    borderColor: nightMode ? '#525252' : '#cbd5e1',
+    color: nightMode ? '#ffffff' : '#1e293b',
+  };
+
+  return (
+    <div className="fixed bottom-3 left-3 right-3 sm:left-6 sm:right-6 max-w-2xl mx-auto z-1000 select-none">
+      <div
+        className="border-2 rounded-2xl px-3.5 py-2.5 flex items-center justify-between gap-2.5 shadow-xl transition-colors"
+        style={cardStyle}
       >
-        <div className="max-w-4xl mx-auto px-3 py-2">
-          {/* Top telemetry row: Speedometer & trip summaries */}
-          <div
-            className={`flex items-center justify-between gap-2 border-b pb-1.5 ${
-              nightMode ? 'border-neutral-800/80' : 'border-slate-200'
-            }`}
-          >
-            {/* Speed readout */}
-            <div
-              className={`flex items-baseline border px-2.5 py-0.5 rounded-lg transition-colors ${
-                nightMode
-                  ? 'bg-neutral-900 border-neutral-700/80 text-emerald-400'
-                  : 'bg-slate-100 border-slate-300 text-emerald-700'
-              }`}
-            >
-              <span className="text-2xl sm:text-3xl font-black font-mono">
-                {displaySpeed}
-              </span>
-              <span
-                className={`text-[11px] font-bold ml-1 uppercase ${
-                  nightMode ? 'text-neutral-400' : 'text-slate-500'
-                }`}
+        {isNavigating ? (
+          <>
+            {/* Left: Speed readout + END button */}
+            <div className="flex items-center gap-2 shrink-0">
+              <div
+                className="border px-2 py-1 rounded-xl text-center min-w-[58px]"
+                style={{
+                  background: nightMode ? '#171717' : '#f8fafc',
+                  borderColor: nightMode ? '#404040' : '#e2e8f0',
+                }}
               >
-                km/h
-              </span>
-            </div>
-
-            {/* Trip summary values */}
-            <div className="flex items-center space-x-3 sm:space-x-5 text-center">
-              <div>
-                <div
-                  className={`text-[10px] uppercase tracking-wider font-bold ${
-                    nightMode ? 'text-neutral-400' : 'text-slate-500'
-                  }`}
-                >
-                  ETA
-                </div>
-                <div
-                  className={`text-lg sm:text-xl font-black font-mono ${
-                    nightMode ? 'text-white' : 'text-slate-900'
-                  }`}
-                >
-                  {eta ? formatEta(eta) : '--:--'}
-                </div>
-              </div>
-
-              <div
-                className={`h-6 w-px ${nightMode ? 'bg-neutral-800' : 'bg-slate-200'}`}
-              />
-
-              <div>
-                <div
-                  className={`text-[10px] uppercase tracking-wider font-bold ${
-                    nightMode ? 'text-neutral-400' : 'text-slate-500'
-                  }`}
-                >
-                  Remaining
-                </div>
-                <div
-                  className={`text-lg sm:text-xl font-black font-mono ${
-                    nightMode ? 'text-blue-400' : 'text-blue-600'
-                  }`}
-                >
-                  {formatDuration(remainingDurationSeconds)}
-                </div>
-              </div>
-
-              <div
-                className={`h-6 w-px ${nightMode ? 'bg-neutral-800' : 'bg-slate-200'}`}
-              />
-
-              <div>
-                <div
-                  className={`text-[10px] uppercase tracking-wider font-bold ${
-                    nightMode ? 'text-neutral-400' : 'text-slate-500'
-                  }`}
-                >
-                  Distance
-                </div>
-                <div
-                  className={`text-lg sm:text-xl font-black font-mono ${
-                    nightMode ? 'text-white' : 'text-slate-900'
-                  }`}
-                >
-                  {formatDistance(remainingDistanceMeters)}
-                </div>
-              </div>
-            </div>
-
-            {/* Re-center navigation icon button */}
-            <button
-              onClick={onRecenter}
-              aria-label="Re-center map on vehicle"
-              title="Center map on car"
-              className={`h-10 w-10 sm:h-11 sm:w-11 rounded-xl flex items-center justify-center border-2 transition-all shadow-sm ${
-                followCar
-                  ? nightMode
-                    ? 'bg-neutral-800 border-neutral-600 text-cyan-400'
-                    : 'bg-slate-100 border-slate-300 text-blue-600 hover:bg-slate-200'
-                  : 'bg-amber-600 border-amber-400 text-black animate-pulse shadow-md'
-              }`}
-            >
-              <Navigation className="w-5 h-5 fill-current" />
-            </button>
-          </div>
-
-          {/* Bottom row: End trip & Night/Day toggle */}
-          <div className="flex items-center justify-between gap-2 pt-1.5">
-            {/* End button */}
-            <button
-              onClick={onEndRoute}
-              aria-label="End navigation trip"
-              className="h-10 sm:h-11 px-4 bg-red-600 hover:bg-red-700 active:bg-red-800 border border-red-400 rounded-xl font-black text-sm sm:text-base text-white tracking-wider uppercase transition-colors shrink-0 shadow-md"
-            >
-              END
-            </button>
-
-            {destinationName && (
-              <div
-                className={`text-xs truncate max-w-xs sm:max-w-md ${
-                  nightMode ? 'text-neutral-400' : 'text-slate-500'
-                }`}
-              >
-                to{' '}
-                <span
-                  className={`font-semibold ${
-                    nightMode ? 'text-neutral-200' : 'text-slate-800'
-                  }`}
-                >
-                  {destinationName}
+                <span className="font-bold font-mono text-lg block leading-tight text-emerald-500">
+                  {Math.round(speedKmh)}
+                </span>
+                <span className="text-[9px] block uppercase font-mono tracking-wider opacity-60">
+                  KM/H
                 </span>
               </div>
-            )}
+              <button
+                onClick={onEndRoute}
+                aria-label="End route"
+                className="bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-extrabold h-11 px-4 rounded-xl text-sm tracking-wider uppercase shadow-md flex items-center justify-center shrink-0"
+              >
+                END
+              </button>
+            </div>
 
-            {/* D/N Button - Icon Only, reduced by 20% */}
-            <button
-              onClick={onToggleNight}
-              aria-label={nightMode ? 'Switch to light map mode' : 'Switch to dark map mode'}
-              title={nightMode ? 'Switch to light mode' : 'Switch to dark mode'}
-              className={`h-10 w-10 sm:h-11 sm:w-11 rounded-xl border flex items-center justify-center transition-colors shrink-0 ${
-                nightMode
-                  ? 'bg-neutral-800 hover:bg-neutral-700 active:bg-neutral-900 border-neutral-600 text-white'
-                  : 'bg-slate-100 hover:bg-slate-200 active:bg-slate-300 border-slate-300 text-slate-800 shadow-sm'
-              }`}
-            >
-              {nightMode ? (
-                <Moon className="w-5 h-5 text-amber-300" />
-              ) : (
-                <Sun className="w-5 h-5 text-yellow-600" />
+            {/* Center: ETA / Remaining / Distance & Destination */}
+            <div className="flex flex-col items-center justify-center flex-1 min-w-0 px-2 text-center">
+              <div className="flex items-center justify-center gap-2.5 sm:gap-3.5">
+                <div>
+                  <div className="text-[9px] uppercase font-bold tracking-wider opacity-60">ETA</div>
+                  <div className="font-bold font-mono text-sm sm:text-base leading-tight">
+                    {eta ? `${two(eta.getHours())}:${two(eta.getMinutes())}` : '--:--'}
+                  </div>
+                </div>
+                <div className="h-5 w-px opacity-20 bg-current" />
+                <div>
+                  <div className="text-[9px] uppercase font-bold tracking-wider opacity-60">REMAINING</div>
+                  <div className="font-bold font-mono text-sm sm:text-base leading-tight" style={{ color: '#1A73E8' }}>
+                    {mins} min
+                  </div>
+                </div>
+                <div className="h-5 w-px opacity-20 bg-current" />
+                <div>
+                  <div className="text-[9px] uppercase font-bold tracking-wider opacity-60">DISTANCE</div>
+                  <div className="font-bold font-mono text-sm sm:text-base leading-tight">
+                    {fmtDist(remainingDistanceMeters)}
+                  </div>
+                </div>
+              </div>
+              <div className="text-xs font-medium truncate max-w-full opacity-75 mt-0.5">
+                to {destinationName || 'Destination'}
+              </div>
+            </div>
+
+            {/* Right: Mute + Recenter + Day/Night */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                onClick={onToggleMute}
+                aria-label={isMuted ? 'Unmute voice' : 'Mute voice'}
+                className="w-11 h-11 border rounded-xl flex items-center justify-center text-lg shadow-sm"
+                style={{
+                  ...iconBtnStyle,
+                  background: isMuted ? (nightMode ? '#78350f' : '#fef3c7') : iconBtnStyle.background,
+                }}
+              >
+                {isMuted ? '🔇' : '🔊'}
+              </button>
+
+              <button
+                onClick={onRecenter}
+                aria-label="Re-center map on car"
+                className="w-11 h-11 rounded-xl flex items-center justify-center font-bold text-lg text-white shadow-sm transition-transform active:scale-95"
+                style={{
+                  background: followCar ? '#1A73E8' : '#d97706',
+                }}
+              >
+                🧭
+              </button>
+
+              {onToggleNight && (
+                <button
+                  onClick={onToggleNight}
+                  aria-label={nightMode ? 'Switch to daylight' : 'Switch to night mode'}
+                  className="w-11 h-11 border rounded-xl flex items-center justify-center text-lg shadow-sm"
+                  style={iconBtnStyle}
+                >
+                  {nightMode ? '🌙' : '☀️'}
+                </button>
               )}
+            </div>
+          </>
+        ) : (
+          <>
+            {/* Idle state: Left buttons (PIN + HISTORY) */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              {onStartPinMode && (
+                <button
+                  onClick={onStartPinMode}
+                  aria-label="Drop pin on map"
+                  className="flex items-center gap-1.5 h-11 px-3 sm:px-3.5 rounded-xl font-bold text-xs sm:text-sm border shadow-sm shrink-0 active:scale-95 transition-transform"
+                  style={iconBtnStyle}
+                >
+                  <span>📍</span>
+                  <span>PIN</span>
+                </button>
+              )}
+              {onOpenHistory && (
+                <button
+                  onClick={onOpenHistory}
+                  aria-label="Trip history"
+                  className="flex items-center gap-1.5 h-11 px-3 sm:px-3.5 rounded-xl font-bold text-xs sm:text-sm border shadow-sm shrink-0 active:scale-95 transition-transform"
+                  style={iconBtnStyle}
+                >
+                  <span>🕒</span>
+                  <span className="hidden xs:inline sm:inline">HISTORY</span>
+                </button>
+              )}
+            </div>
+
+            {/* Center: Tap to search prompt */}
+            <button
+              onClick={onSearch}
+              className="flex-1 min-w-0 px-2 py-1 text-center cursor-pointer rounded-lg hover:opacity-90 active:scale-[0.99] transition"
+            >
+              <div className="font-bold text-sm sm:text-base truncate">
+                Enter destination above to drive
+              </div>
+              <div className="text-[11px] sm:text-xs opacity-60 truncate">
+                Origin fixed from car GPS · Tap here or top search bar
+              </div>
             </button>
-          </div>
-        </div>
-      </footer>
-    );
-  }
 
-  // Idle state (when not navigating)
-  return (
-    <footer
-      role="contentinfo"
-      className={`fixed bottom-0 left-0 right-0 z-1000 backdrop-blur-md border-t select-none transition-colors ${
-        nightMode
-          ? 'bg-neutral-950/95 border-neutral-700 text-white shadow-xl'
-          : 'bg-white/95 border-slate-300 text-slate-900 shadow-lg'
-      }`}
-    >
-      <div className="max-w-4xl mx-auto px-3 py-2 flex items-center justify-between gap-2.5">
-        {/* Drop Pin Button (reduced by 20%) */}
-        <button
-          onClick={onStartPinMode}
-          aria-label="Drop a destination pin on the map"
-          className={`h-11 sm:h-12 px-4 border rounded-xl font-bold text-sm sm:text-base tracking-wide shrink-0 flex items-center gap-1.5 transition-colors shadow ${
-            nightMode
-              ? 'bg-neutral-800 hover:bg-neutral-700 active:bg-neutral-900 border-neutral-600 text-white'
-              : 'bg-slate-100 hover:bg-slate-200 active:bg-slate-300 border-slate-300 text-slate-800'
-          }`}
-        >
-          <MapPin className="w-4 h-4 text-red-500" />
-          <span>PIN</span>
-        </button>
+            {/* Right: Day/Night toggle + Recenter button */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              {onToggleNight && (
+                <button
+                  onClick={onToggleNight}
+                  aria-label={nightMode ? 'Switch to daylight' : 'Switch to night mode'}
+                  className="w-11 h-11 border rounded-xl flex items-center justify-center text-lg shadow-sm"
+                  style={iconBtnStyle}
+                >
+                  {nightMode ? '🌙' : '☀️'}
+                </button>
+              )}
 
-        {/* Guidance Prompt */}
-        <div className="flex-1 min-w-0 px-1 text-left">
-          <div
-            className={`text-sm sm:text-base font-bold truncate ${
-              nightMode ? 'text-neutral-100' : 'text-slate-900'
-            }`}
-          >
-            {destinationName ? `Target: ${destinationName}` : 'Enter destination above to drive'}
-          </div>
-          <div
-            className={`text-[11px] truncate ${
-              nightMode ? 'text-neutral-400' : 'text-slate-500'
-            }`}
-          >
-            Origin fixed from car GPS
-          </div>
-        </div>
-
-        {/* D/N Button - Icon Only (reduced by 20%) */}
-        <button
-          onClick={onToggleNight}
-          aria-label={nightMode ? 'Switch to light map mode' : 'Switch to dark map mode'}
-          title={nightMode ? 'Switch to light mode' : 'Switch to dark mode'}
-          className={`h-11 w-11 rounded-xl border flex items-center justify-center shrink-0 transition-colors shadow-sm ${
-            nightMode
-              ? 'bg-neutral-800 hover:bg-neutral-700 active:bg-neutral-900 border-neutral-600 text-white'
-              : 'bg-slate-100 hover:bg-slate-200 active:bg-slate-300 border-slate-300 text-slate-800'
-          }`}
-        >
-          {nightMode ? (
-            <Moon className="w-5 h-5 text-amber-300" />
-          ) : (
-            <Sun className="w-5 h-5 text-yellow-600" />
-          )}
-        </button>
-
-        {/* Navigation Icon Button (replaces ME button, reduced by 20%) */}
-        <button
-          onClick={onRecenter}
-          aria-label="Re-center map on car position"
-          title="Center on car"
-          className={`h-11 w-11 rounded-xl flex items-center justify-center border-2 transition-all shrink-0 shadow-sm ${
-            followCar
-              ? nightMode
-                ? 'bg-neutral-800 border-neutral-600 text-cyan-400'
-                : 'bg-slate-100 border-slate-300 text-blue-600 hover:bg-slate-200'
-              : 'bg-amber-600 border-amber-400 text-black shadow-md'
-          }`}
-        >
-          <Navigation className="w-5 h-5 fill-current" />
-        </button>
+              <button
+                onClick={onRecenter}
+                aria-label="Re-center map on car"
+                className="w-11 h-11 rounded-xl flex items-center justify-center font-bold text-lg text-white shadow-sm transition-transform active:scale-95"
+                style={{
+                  background: followCar ? '#2563eb' : '#d97706',
+                }}
+              >
+                🧭
+              </button>
+            </div>
+          </>
+        )}
       </div>
-    </footer>
+    </div>
   );
 };

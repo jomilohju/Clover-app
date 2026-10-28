@@ -94,9 +94,10 @@ export const TopTurnBar: React.FC<TopTurnBarProps> = ({
       role="banner"
       className={`fixed top-0 left-0 right-0 z-1000 shadow-xl border-b-4 select-none transition-all duration-200 ${
         nightMode
-          ? 'bg-neutral-950 text-white border-blue-500'
-          : 'bg-white text-slate-900 border-blue-600 shadow-md'
+          ? 'bg-neutral-950 text-white'
+          : 'bg-white text-slate-900 shadow-md'
       }`}
+      style={{ borderBottomColor: '#1A73E8' }}
     >
       <div className="max-w-4xl mx-auto p-2.5 sm:p-3.5">
         <div className="flex items-center space-x-3 sm:space-x-4">

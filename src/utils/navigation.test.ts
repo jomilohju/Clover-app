@@ -12,7 +12,7 @@ import {
   getManeuverIconType,
   getVoiceAnnouncement,
 } from './navigation';
-import { generateFallbackRoute } from './fallbackRouting';
+import { formatTripDate } from './tripHistory';
 import { RouteStep } from '../types/navigation';
 
 test('haversineDistance computes accurate ground distance in meters', () => {
@@ -120,14 +120,12 @@ test('getVoiceAnnouncement returns timely alerts at proper milestones', () => {
   assert.ok(announceNow?.text.includes('Turn left now'));
 });
 
-test('generateFallbackRoute produces valid navigatable route when offline', () => {
-  const route = generateFallbackRoute(6.5244, 3.3792, 6.4283, 3.4219, 'Eko Hotel');
-  assert.ok(route.distance > 0);
-  assert.ok(route.duration > 0);
-  assert.ok(route.coordinates.length >= 3);
-  assert.ok(route.steps.length >= 2);
-  assert.equal(route.destinationName, 'Eko Hotel');
-  assert.equal(route.steps[0].maneuver.type, 'depart');
-  assert.equal(route.steps[route.steps.length - 1].maneuver.type, 'arrive');
+test('formatTripDate accurately labels today and recent timestamps', () => {
+  const now = Date.now();
+  assert.ok(formatTripDate(now).startsWith('Today,'));
+  
+  const yesterday = now - 24 * 60 * 60 * 1000;
+  assert.ok(formatTripDate(yesterday).startsWith('Yesterday,'));
 });
+
 

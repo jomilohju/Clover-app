@@ -55,3 +55,12 @@ export interface SearchResultItem {
   lng: number;
   distanceKm?: number;
 }
+
+export interface CompletedTrip {
+  id: string;
+  destinationName: string;
+  destinationCoords: [number, number]; // [lat, lng]
+  completedAt: number; // timestamp in milliseconds
+  distanceMeters: number;
+  durationSeconds: number;
+}

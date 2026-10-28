@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { GeoLocation, RouteData, RouteStep } from '../types/navigation';
+import { tileTemplate } from '../utils/tileCache';
 
 interface NavigationMapProps {
   currentLocation: GeoLocation | null;
@@ -14,26 +15,33 @@ interface NavigationMapProps {
   onMapCenterChange?: (lat: number, lng: number) => void;
   gpsAccuracy?: number;
   speedKmh?: number;
+  hideControls?: boolean;
 }
 
+// No CSS transitions, filters or shadows: they are slow on head-unit GPUs
 function createCarIcon(isNight: boolean) {
-  const arrowFill = isNight ? '#00e5ff' : '#1d4ed8';
-  const shadow = isNight
-    ? 'filter: drop-shadow(0 0 8px rgba(0,229,255,0.85));'
-    : 'filter: drop-shadow(0 2px 6px rgba(0,0,0,0.55));';
-
+  // Post-2023 Google Maps Active Navigation Blue: #1A73E8
+  const fill = isNight ? '#00e5ff' : '#1A73E8';
   return L.divIcon({
     className: 'car-marker-container',
     iconSize: [48, 48],
     iconAnchor: [24, 24],
-    html: `
-      <div id="car-arrow-wrap" style="width:48px;height:48px;display:flex;align-items:center;justify-content:center;transition:transform 0.25s linear;">
-        <svg width="44" height="44" viewBox="0 0 44 44" style="${shadow}">
-          <polygon points="22,2 39,40 22,31 5,40" fill="${arrowFill}" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round" />
-        </svg>
-      </div>
-    `,
+    html: `<div id="car-arrow-wrap" style="width:48px;height:48px;display:flex;align-items:center;justify-content:center;"><svg width="44" height="44" viewBox="0 0 44 44"><polygon points="22,2 39,40 22,31 5,40" fill="${fill}" stroke="#ffffff" stroke-width="3.5" stroke-linejoin="round"/></svg></div>`,
   });
+}
+
+function dotIcon(className: string, size: number, bg: string) {
+  return L.divIcon({
+    className,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${bg};border:4px solid #ffffff;box-sizing:border-box;"></div>`,
+  });
+}
+
+function applyHeading(h: number | null | undefined) {
+  const el = document.getElementById('car-arrow-wrap');
+  if (el && h !== null && h !== undefined) el.style.transform = `rotate(${Math.round(h)}deg)`;
 }
 
 export const NavigationMap: React.FC<NavigationMapProps> = ({
@@ -47,26 +55,26 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
   onMapCenterChange,
   gpsAccuracy = 10,
   speedKmh = 0,
+  hideControls = false,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const tileLayerRef = useRef<L.TileLayer | null>(null);
   const carMarkerRef = useRef<L.Marker | null>(null);
-  const carArrowElRef = useRef<HTMLElement | null>(null);
-  const routePolylineRef = useRef<L.Polyline | null>(null);
-  const routeOutlineRef = useRef<L.Polyline | null>(null);
-  const destMarkerRef = useRef<L.Marker | null>(null);
+  const routeLayersRef = useRef<L.Layer[]>([]);
   const turnMarkerRef = useRef<L.Marker | null>(null);
-  const lastPanTimeRef = useRef<number>(0);
-  const initialViewSetRef = useRef<boolean>(false);
+  const lastPanTimeRef = useRef(0);
+  const initialViewSetRef = useRef(false);
 
-  // Initialize Leaflet map
+  // FIX: the map's event handlers are created once, so they must read the latest props from a ref.
+  // Before, isPinMode was frozen as false, so "Set here" always used the default Lagos centre.
+  const live = useRef({ isPinMode, onMapCenterChange, onUserMapInteraction });
+  live.current = { isPinMode, onMapCenterChange, onUserMapInteraction };
+
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
-
-    // Default to Lagos, Nigeria
-    const defaultLat = currentLocation ? currentLocation.lat : 6.5244;
-    const defaultLng = currentLocation ? currentLocation.lng : 3.3792;
+    const lat = currentLocation ? currentLocation.lat : 6.5244;
+    const lng = currentLocation ? currentLocation.lng : 3.3792;
 
     const map = L.map(mapContainerRef.current, {
       zoomControl: false,
@@ -74,31 +82,24 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
       zoomAnimation: false,
       markerZoomAnimation: false,
       inertia: false,
-      attributionControl: false,
-    }).setView([defaultLat, defaultLng], 16);
-
+    }).setView([lat, lng], 16);
+    map.attributionControl.setPrefix(false); // keep the map-data credit visible (licence requirement)
     mapRef.current = map;
 
-    // Listen to user map interactions to unfollow
-    map.on('dragstart', () => {
-      onUserMapInteraction();
-    });
-
+    map.on('dragstart', () => live.current.onUserMapInteraction());
     map.on('move', () => {
-      if (isPinMode && onMapCenterChange) {
+      if (live.current.isPinMode) {
         const c = map.getCenter();
-        onMapCenterChange(c.lat, c.lng);
+        live.current.onMapCenterChange?.(c.lat, c.lng);
       }
     });
 
-    const marker = L.marker([defaultLat, defaultLng], {
+    carMarkerRef.current = L.marker([lat, lng], {
       interactive: false,
       keyboard: false,
       icon: createCarIcon(nightMode),
       zIndexOffset: 1000,
     }).addTo(map);
-
-    carMarkerRef.current = marker;
 
     return () => {
       map.remove();
@@ -106,220 +107,133 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     };
   }, []);
 
-  // Update Tile Layer and Car Marker when night mode changes
+  // Tiles: CARTO tiles (Voyager for day, Dark Matter for night)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
-    if (tileLayerRef.current) {
-      map.removeLayer(tileLayerRef.current);
-    }
-
-    const tileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-
-    const newLayer = L.tileLayer(tileUrl, {
-      subdomains: 'abc',
-      maxZoom: 19,
-      updateWhenIdle: true,
-      updateWhenZooming: false,
-      keepBuffer: 2,
-      className: nightMode ? 'dark-tiles' : 'light-tiles',
-    }).addTo(map);
-
-    tileLayerRef.current = newLayer;
-
-    // Update car icon appearance for dark / light mode
+    if (tileLayerRef.current) map.removeLayer(tileLayerRef.current);
+    tileLayerRef.current = L.tileLayer(
+      tileTemplate(nightMode),
+      {
+        subdomains: 'abcd',
+        maxZoom: 18,
+        updateWhenIdle: true,
+        updateWhenZooming: false,
+        keepBuffer: 2,
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      }
+    ).addTo(map);
     if (carMarkerRef.current) {
       carMarkerRef.current.setIcon(createCarIcon(nightMode));
-      carArrowElRef.current = document.getElementById('car-arrow-wrap');
-      if (carArrowElRef.current && currentLocation?.heading !== undefined && currentLocation.heading !== null) {
-        carArrowElRef.current.style.transform = `rotate(${Math.round(currentLocation.heading)}deg)`;
-      }
+      applyHeading(currentLocation?.heading);
     }
   }, [nightMode]);
 
-  // Update vehicle position and heading
+  // FIX: entering pin mode reports the current crosshair position straight away
   useEffect(() => {
-    if (!currentLocation || !mapRef.current || !carMarkerRef.current) return;
-
-    const latLng: [number, number] = [currentLocation.lat, currentLocation.lng];
-    carMarkerRef.current.setLatLng(latLng);
-
-    // Grab inner arrow element to rotate
-    if (!carArrowElRef.current) {
-      carArrowElRef.current = document.getElementById('car-arrow-wrap');
+    const map = mapRef.current;
+    if (isPinMode && map) {
+      const c = map.getCenter();
+      onMapCenterChange?.(c.lat, c.lng);
     }
-    if (carArrowElRef.current && currentLocation.heading !== undefined && currentLocation.heading !== null) {
-      carArrowElRef.current.style.transform = `rotate(${Math.round(currentLocation.heading)}deg)`;
-    }
+  }, [isPinMode]);
 
-    // First view setup or follow car
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!currentLocation || !map || !carMarkerRef.current) return;
+    const ll: [number, number] = [currentLocation.lat, currentLocation.lng];
+    carMarkerRef.current.setLatLng(ll);
+    applyHeading(currentLocation.heading);
     const now = Date.now();
     if (!initialViewSetRef.current) {
       initialViewSetRef.current = true;
-      mapRef.current.setView(latLng, 16, { animate: false });
+      map.setView(ll, 16, { animate: false });
     } else if (followCar && now - lastPanTimeRef.current > 1200) {
       lastPanTimeRef.current = now;
-      mapRef.current.panTo(latLng, { animate: false });
+      map.panTo(ll, { animate: false });
     }
   }, [currentLocation, followCar]);
 
-  // Update route polyline
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
-    if (routePolylineRef.current) {
-      map.removeLayer(routePolylineRef.current);
-      routePolylineRef.current = null;
-    }
-    if (routeOutlineRef.current) {
-      map.removeLayer(routeOutlineRef.current);
-      routeOutlineRef.current = null;
-    }
-    if (destMarkerRef.current) {
-      map.removeLayer(destMarkerRef.current);
-      destMarkerRef.current = null;
-    }
-    if (turnMarkerRef.current) {
-      map.removeLayer(turnMarkerRef.current);
-      turnMarkerRef.current = null;
-    }
-
+    routeLayersRef.current.forEach((l) => map.removeLayer(l));
+    routeLayersRef.current = [];
     if (!routeData || routeData.coordinates.length === 0) return;
 
-    // Dark outline casing for contrast
+    // Route outline casing for contrast
     const outline = L.polyline(routeData.coordinates, {
-      color: nightMode ? '#000000' : '#1e3a8a',
+      color: nightMode ? '#000000' : '#1557b0',
       weight: 12,
       opacity: 0.9,
+      smoothFactor: 2,
       interactive: false,
     }).addTo(map);
-    routeOutlineRef.current = outline;
 
-    // Core bright navigation line
-    const polyline = L.polyline(routeData.coordinates, {
-      color: nightMode ? '#00e5ff' : '#2563eb',
+    // Active Navigation: #1A73E8 (High-saturation blue route line from post-2023 palette)
+    const line = L.polyline(routeData.coordinates, {
+      color: nightMode ? '#00e5ff' : '#1A73E8',
       weight: 8,
-      opacity: 0.95,
+      opacity: 0.98,
+      smoothFactor: 2,
       interactive: false,
     }).addTo(map);
-    routePolylineRef.current = polyline;
 
-    // Destination Pin
     const [destLat, destLng] = routeData.destinationCoords;
-    const destIcon = L.divIcon({
-      className: 'dest-marker',
-      iconSize: [32, 32],
-      iconAnchor: [16, 16],
-      html: `
-        <div style="width:32px;height:32px;border-radius:50%;background:#ef4444;border:4px solid #ffffff;box-shadow:0 0 10px rgba(239,68,68,0.9);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:14px;">
-          ★
-        </div>
-      `,
-    });
-
-    const destMarker = L.marker([destLat, destLng], {
+    const dest = L.marker([destLat, destLng], {
       interactive: false,
-      icon: destIcon,
+      icon: dotIcon('dest-marker', 32, '#EA4335'), // Google red
     }).addTo(map);
-    destMarkerRef.current = destMarker;
+    routeLayersRef.current = [outline, line, dest];
 
-    // Fit route in view if user just planned route
-    if (!followCar) {
-      map.fitBounds(polyline.getBounds(), {
-        padding: [80, 80],
-        animate: false,
-      });
-    }
+    if (!followCar) map.fitBounds(line.getBounds(), { padding: [80, 80], animate: false });
   }, [routeData, nightMode]);
 
-  // Update Turn Marker on map
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
     if (turnMarkerRef.current) {
       map.removeLayer(turnMarkerRef.current);
       turnMarkerRef.current = null;
     }
-
     if (currentStep && currentStep.maneuver && currentStep.maneuver.location) {
-      const [turnLon, turnLat] = currentStep.maneuver.location;
-      const turnIcon = L.divIcon({
-        className: 'turn-dot',
-        iconSize: [22, 22],
-        iconAnchor: [11, 11],
-        html: `
-          <div style="width:20px;height:20px;border-radius:50%;background:#10b981;border:3px solid #ffffff;box-shadow:0 0 8px rgba(16,185,129,0.8);"></div>
-        `,
-      });
-
-      const tm = L.marker([turnLat, turnLon], {
+      const [lon, lat] = currentStep.maneuver.location;
+      turnMarkerRef.current = L.marker([lat, lon], {
         interactive: false,
-        icon: turnIcon,
+        icon: dotIcon('turn-dot', 24, '#1E8E3E'), // Google green
       }).addTo(map);
-      turnMarkerRef.current = tm;
     }
   }, [currentStep]);
 
-  const handleZoomIn = () => {
-    mapRef.current?.zoomIn();
-  };
-
-  const handleZoomOut = () => {
-    mapRef.current?.zoomOut();
+  // Colours are inline styles so they still work if Tailwind's colour utilities fail on an old browser
+  const panel: React.CSSProperties = nightMode
+    ? { background: 'rgba(0,0,0,0.85)', borderColor: '#404040', color: '#ffffff' }
+    : { background: 'rgba(255,255,255,0.95)', borderColor: '#cbd5e1', color: '#1e293b' };
+  const zoomBtn: React.CSSProperties = {
+    ...panel,
+    background: nightMode ? '#171717' : '#ffffff',
   };
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-neutral-950">
-      {/* Leaflet map div */}
-      <div ref={mapContainerRef} className="absolute inset-0 z-0 bg-neutral-900" />
+    <div className="relative w-full h-full overflow-hidden" style={{ background: '#0a0a0a' }}>
+      <div ref={mapContainerRef} className="absolute inset-0 z-0" style={{ background: '#171717' }} />
 
-      {/* GPS info badge (top left, below top search bar) */}
-      <div
-        aria-live="polite"
-        className={`absolute top-20 sm:top-22 left-3 z-500 backdrop-blur-md border px-3 py-1.5 rounded-lg text-sm font-mono flex items-center gap-3 shadow-lg select-none transition-colors ${
-          nightMode
-            ? 'bg-black/85 border-neutral-700 text-white'
-            : 'bg-white/95 border-slate-300 text-slate-800 shadow-md'
-        }`}
-      >
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
-          <span className="font-bold">GPS: {Math.round(gpsAccuracy)}m</span>
-        </div>
-        <div className={nightMode ? 'text-neutral-400' : 'text-slate-400'}>|</div>
-        <div className={`font-bold ${nightMode ? 'text-emerald-400' : 'text-emerald-700'}`}>
-          {Math.round(speedKmh)} km/h
-        </div>
-      </div>
+      {!hideControls && (
+        <>
+          <div aria-live="polite" className="absolute top-20 left-3 z-500 border px-3 py-1.5 rounded-lg text-sm font-mono flex items-center gap-3 select-none" style={panel}>
+            <span style={{ width: 10, height: 10, borderRadius: 5, background: '#10b981', display: 'inline-block' }} />
+            <span className="font-bold">GPS: {Math.round(gpsAccuracy)}m</span>
+            <span style={{ opacity: 0.5 }}>|</span>
+            <span className="font-bold" style={{ color: nightMode ? '#34d399' : '#047857' }}>{Math.round(speedKmh)} km/h</span>
+          </div>
 
-      {/* Side map zoom controls (+, -) reduced by 20% */}
-      <div className="absolute right-3 top-20 sm:top-22 z-500 flex flex-col gap-1.5 select-none">
-        <button
-          onClick={handleZoomIn}
-          aria-label="Zoom in"
-          className={`w-11 h-11 border-2 rounded-xl font-bold text-xl flex items-center justify-center shadow-lg backdrop-blur-sm transition-colors ${
-            nightMode
-              ? 'bg-neutral-900/90 active:bg-neutral-800 text-white border-neutral-700 hover:border-neutral-500'
-              : 'bg-white/95 active:bg-slate-200 text-slate-800 border-slate-300 hover:border-slate-400 shadow-md'
-          }`}
-        >
-          +
-        </button>
-        <button
-          onClick={handleZoomOut}
-          aria-label="Zoom out"
-          className={`w-11 h-11 border-2 rounded-xl font-bold text-xl flex items-center justify-center shadow-lg backdrop-blur-sm transition-colors ${
-            nightMode
-              ? 'bg-neutral-900/90 active:bg-neutral-800 text-white border-neutral-700 hover:border-neutral-500'
-              : 'bg-white/95 active:bg-slate-200 text-slate-800 border-slate-300 hover:border-slate-400 shadow-md'
-          }`}
-        >
-          −
-        </button>
-      </div>
+          <div className="absolute right-3 top-20 z-500 flex flex-col gap-1.5 select-none">
+            <button onClick={() => mapRef.current?.zoomIn()} aria-label="Zoom in" className="w-13 h-13 border-2 rounded-xl font-bold text-2xl flex items-center justify-center shadow-md active:scale-95 transition-transform" style={zoomBtn}>+</button>
+            <button onClick={() => mapRef.current?.zoomOut()} aria-label="Zoom out" className="w-13 h-13 border-2 rounded-xl font-bold text-2xl flex items-center justify-center shadow-md active:scale-95 transition-transform" style={zoomBtn}>−</button>
+          </div>
+        </>
+      )}
     </div>
   );
 };

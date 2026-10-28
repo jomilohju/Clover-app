@@ -1,8 +1,15 @@
-@import "tailwindcss";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 * {
   -webkit-tap-highlight-color: transparent;
   user-select: none;
+}
+
+input,
+textarea {
+  user-select: text;
 }
 
 html, body, #root {
@@ -21,39 +28,20 @@ html, body, #root {
   background: #111111 !important;
 }
 
-.car-marker-container {
-  background: transparent !important;
-  border: none !important;
-}
-
-.dest-marker {
-  background: transparent !important;
-  border: none !important;
-}
-
+.car-marker-container,
+.dest-marker,
 .turn-dot {
   background: transparent !important;
   border: none !important;
 }
 
-/* Z-index layers for navigation overlays */
-.z-500 {
-  z-index: 500;
-}
-
-.z-1000 {
-  z-index: 1000;
-}
-
-.z-2000 {
-  z-index: 2000;
-}
-
-/* Automotive dark map filter on standard tiles */
-.dark-tiles {
-  filter: invert(100%) hue-rotate(180deg) brightness(85%) contrast(110%);
-}
-
-.light-tiles {
-  filter: none;
+/* Head-unit performance: no blur, shadows, transitions or animations anywhere */
+*,
+*::before,
+*::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  box-shadow: none !important;
+  transition: none !important;
+  animation: none !important;
 }

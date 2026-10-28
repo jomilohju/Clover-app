@@ -1,6 +1,5 @@
 import { RouteData, RouteStep } from '../types/navigation';
 import { decodePolyline } from '../utils/navigation';
-import { generateFallbackRoute } from '../utils/fallbackRouting';
 
 interface OsrmStep {
   distance: number;
@@ -91,10 +90,7 @@ export async function fetchRoute(
   const queryParams = `startLng=${startLng}&startLat=${startLat}&destLng=${destLng}&destLat=${destLat}`;
   const directPath = `${startLng},${startLat};${destLng},${destLat}?overview=full&geometries=polyline&steps=true&annotations=false`;
 
-  // Candidate URLs in priority order:
-  // 1. Same-origin backend proxy (no CORS issues, server handles mirror retries)
-  // 2. Direct OSRM primary
-  // 3. Direct OSM Germany mirror
+  // 1. Same-origin backend proxy, 2. public OSRM, 3. OSM Germany mirror
   const candidates = [
     `/api/route?${queryParams}`,
     `https://router.project-osrm.org/route/v1/driving/${directPath}`,
@@ -120,12 +116,9 @@ export async function fetchRoute(
       }
     } catch (err: unknown) {
       console.warn(`Routing attempt via ${url} failed:`, err instanceof Error ? err.message : err);
-      // Continue to next candidate
     }
   }
 
-  // If network dropped, CORS blocked, or remote servers are down:
-  // Generate robust offline road route fallback so navigation NEVER breaks or stalls
-  console.info('Remote routing servers unreachable. Activating offline road route fallback.');
-  return generateFallbackRoute(startLat, startLng, destLat, destLng, destinationName);
+  // Never invent a route: a made-up path with fake turns is worse than an honest error.
+  throw new Error('Could not reach the routing service. Check your data connection and try again.');
 }

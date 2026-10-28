@@ -7,6 +7,9 @@ interface TopSearchBarProps {
   onSelectDestination: (lat: number, lng: number, name: string) => void;
   isPinMode?: boolean;
   nightMode?: boolean;
+  gpsLocked?: boolean;
+  openSignal?: number;
+  onStartPinMode?: () => void;
 }
 
 const PRESET_DESTINATIONS = [
@@ -23,6 +26,9 @@ export const TopSearchBar: React.FC<TopSearchBarProps> = ({
   onSelectDestination,
   isPinMode = false,
   nightMode = true,
+  gpsLocked = true,
+  openSignal = 0,
+  onStartPinMode,
 }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResultItem[]>([]);
@@ -30,9 +36,8 @@ export const TopSearchBar: React.FC<TopSearchBarProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const debounceRef = useRef<NodeJS.Timeout | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Close dropdown on outside click
   useEffect(() => {
     const handleOutsideClick = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
@@ -43,21 +48,25 @@ export const TopSearchBar: React.FC<TopSearchBarProps> = ({
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, []);
 
+  useEffect(() => {
+    if (openSignal > 0) {
+      setIsFocused(true);
+      inputRef.current?.focus();
+    }
+  }, [openSignal]);
+
   const handleQueryChange = (val: string) => {
     setQuery(val);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-
     if (val.trim().length < 2) {
       setResults([]);
       setIsLoading(false);
       return;
     }
-
     setIsLoading(true);
     debounceRef.current = setTimeout(async () => {
       try {
-        const items = await searchPlaces(val, userLocation);
-        setResults(items);
+        setResults(await searchPlaces(val, userLocation));
       } catch (err) {
         console.warn('Top search query error:', err);
       } finally {
@@ -76,29 +85,37 @@ export const TopSearchBar: React.FC<TopSearchBarProps> = ({
 
   if (isPinMode) return null;
 
-  return (
-    <div
-      ref={containerRef}
-      className="fixed top-3 left-3 right-3 sm:left-6 sm:right-6 max-w-2xl mx-auto z-1000 select-none"
+  const rowCls = nightMode
+    ? 'active:bg-blue-950/60 border-neutral-800/80 text-white'
+    : 'active:bg-blue-50 border-slate-200 text-slate-900';
+  const subCls = nightMode ? 'text-neutral-400' : 'text-slate-500';
+
+  const row = (key: string | number, name: string, sub: string, lat: number, lng: number, right: React.ReactNode) => (
+    <button
+      key={key}
+      onMouseDown={() => handleSelect(lat, lng, name)}
+      className={`w-full text-left p-3.5 sm:p-4 flex items-center justify-between gap-3 border-b ${rowCls}`}
     >
-      {/* Search Input Box */}
+      <div className="min-w-0 flex-1">
+        <div className="text-lg sm:text-xl font-bold truncate">{name}</div>
+        <div className={`text-xs sm:text-sm truncate mt-0.5 ${subCls}`}>{sub}</div>
+      </div>
+      {right}
+    </button>
+  );
+
+  return (
+    <div ref={containerRef} className="fixed top-3 left-16 sm:left-48 right-3 sm:right-6 max-w-xl mx-auto z-1000 select-none">
       <div
-        className={`relative flex items-center backdrop-blur-md border-2 rounded-2xl shadow-xl transition-all ${
+        className={`relative flex items-center border-2 rounded-2xl ${
           nightMode
             ? 'bg-neutral-950/95 text-white border-neutral-700 focus-within:border-blue-500'
-            : 'bg-white/95 text-slate-900 border-slate-300 focus-within:border-blue-600 shadow-lg'
+            : 'bg-white/95 text-slate-900 border-slate-300 focus-within:border-blue-600'
         }`}
       >
-        {/* Search Icon */}
-        <div
-          className={`pl-4 pr-2 text-xl font-bold flex items-center justify-center ${
-            nightMode ? 'text-neutral-400' : 'text-slate-500'
-          }`}
-        >
+        <div className={`pl-4 pr-2 text-xl font-bold flex items-center justify-center ${nightMode ? 'text-neutral-400' : 'text-slate-500'}`}>
           🔍
         </div>
-
-        {/* Input for Destination (reduced height by ~20%) */}
         <input
           ref={inputRef}
           type="text"
@@ -110,14 +127,10 @@ export const TopSearchBar: React.FC<TopSearchBarProps> = ({
           autoComplete="off"
           autoCapitalize="off"
           spellCheck={false}
-          className={`w-full h-11 sm:h-13 bg-transparent text-base sm:text-lg font-bold px-2 focus:outline-none ${
-            nightMode
-              ? 'text-white placeholder-neutral-500'
-              : 'text-slate-900 placeholder-slate-400'
+          className={`w-full h-16 bg-transparent text-base sm:text-lg font-bold px-2 focus:outline-none ${
+            nightMode ? 'text-white placeholder-neutral-500' : 'text-slate-900 placeholder-slate-400'
           }`}
         />
-
-        {/* Clear Button */}
         {query.length > 0 && (
           <button
             onClick={() => {
@@ -126,134 +139,83 @@ export const TopSearchBar: React.FC<TopSearchBarProps> = ({
               inputRef.current?.focus();
             }}
             aria-label="Clear destination search"
-            className={`w-8 h-8 mr-2 rounded-full font-bold flex items-center justify-center text-sm shrink-0 transition-colors ${
-              nightMode
-                ? 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300'
-                : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
+            className={`w-12 h-12 mr-2 rounded-full font-bold flex items-center justify-center text-sm shrink-0 ${
+              nightMode ? 'bg-neutral-800 text-neutral-300' : 'bg-slate-200 text-slate-700'
             }`}
           >
             ✕
           </button>
         )}
-
-        {/* Loading Spinner */}
-        {isLoading && (
-          <div className="pr-4 text-blue-500 text-xs font-bold uppercase animate-pulse">
-            Searching...
-          </div>
-        )}
+        {isLoading && <div className="pr-4 text-blue-500 text-xs font-bold uppercase">Searching...</div>}
       </div>
 
-      {/* Dropdown Suggestions & Results */}
       {isFocused && (
         <div
-          className={`mt-2 backdrop-blur-xl border-2 rounded-2xl shadow-2xl overflow-hidden max-h-[60vh] overflow-y-auto divide-y transition-colors ${
+          className={`mt-2 border-2 rounded-2xl overflow-hidden max-h-[60vh] overflow-y-auto divide-y ${
             nightMode
-              ? 'bg-neutral-950/98 border-neutral-700 divide-neutral-800 text-white'
-              : 'bg-white/98 border-slate-300 divide-slate-200 text-slate-900'
+              ? 'bg-neutral-950/95 border-neutral-700 divide-neutral-800 text-white'
+              : 'bg-white/95 border-slate-300 divide-slate-200 text-slate-900'
           }`}
         >
-          {/* Header indicator */}
           <div
             className={`px-4 py-2.5 flex items-center justify-between text-xs font-bold uppercase tracking-wider ${
               nightMode ? 'bg-neutral-900/90 text-neutral-400' : 'bg-slate-100 text-slate-600'
             }`}
           >
             <span>{query.trim().length >= 2 ? 'Matching Destinations' : 'Popular Destinations (Quick Drive)'}</span>
-            <span className={nightMode ? 'text-emerald-400 font-mono' : 'text-emerald-600 font-mono'}>
-              GPS START: LOCKED
+            <span className={`font-mono ${gpsLocked ? (nightMode ? 'text-emerald-400' : 'text-emerald-600') : 'text-amber-500'}`}>
+              {gpsLocked ? 'GPS START: LOCKED' : 'WAITING FOR GPS'}
             </span>
           </div>
 
-          {/* Live Search Results */}
-          {results.length > 0 &&
-            results.map((item) => (
-              <button
-                key={item.id}
-                onMouseDown={() => handleSelect(item.lat, item.lng, item.name)}
-                className={`w-full text-left p-3.5 sm:p-4 transition-colors flex items-center justify-between gap-3 border-b ${
-                  nightMode
-                    ? 'hover:bg-neutral-900 active:bg-blue-950/60 border-neutral-800/80 text-white'
-                    : 'hover:bg-slate-50 active:bg-blue-50 border-slate-200 text-slate-900'
-                }`}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="text-lg sm:text-xl font-bold truncate">
-                    {item.name}
-                  </div>
-                  <div
-                    className={`text-xs sm:text-sm truncate mt-0.5 ${
-                      nightMode ? 'text-neutral-400' : 'text-slate-500'
-                    }`}
-                  >
-                    {item.subtitle}
-                  </div>
-                </div>
-                {item.distanceKm !== undefined && (
-                  <div className="text-right shrink-0">
-                    <span
-                      className={`text-base sm:text-lg font-bold font-mono ${
-                        nightMode ? 'text-blue-400' : 'text-blue-600'
-                      }`}
-                    >
-                      {item.distanceKm} km
-                    </span>
-                    <div
-                      className={`text-[10px] uppercase ${
-                        nightMode ? 'text-neutral-400' : 'text-slate-500'
-                      }`}
-                    >
-                      away
-                    </div>
-                  </div>
-                )}
-              </button>
-            ))}
-
-          {/* Empty Search Notice */}
-          {query.trim().length >= 2 && results.length === 0 && !isLoading && (
-            <div
-              className={`p-5 text-center font-medium ${
-                nightMode ? 'text-neutral-400' : 'text-slate-500'
-              }`}
+          {onStartPinMode && (
+            <button
+              onMouseDown={() => {
+                setIsFocused(false);
+                onStartPinMode();
+              }}
+              className={`w-full text-left p-4 text-lg sm:text-xl font-bold border-b ${nightMode ? 'text-blue-400 border-neutral-800/80' : 'text-blue-600 border-slate-200'}`}
+              style={{ minHeight: 64 }}
             >
+              📍 Drop a pin on the map instead
+            </button>
+          )}
+
+          {results.map((item) =>
+            row(
+              item.id,
+              item.name,
+              item.subtitle,
+              item.lat,
+              item.lng,
+              item.distanceKm !== undefined && (
+                <div className="text-right shrink-0">
+                  <span className={`text-base sm:text-lg font-bold font-mono ${nightMode ? 'text-blue-400' : 'text-blue-600'}`}>
+                    {item.distanceKm} km
+                  </span>
+                  <div className={`text-[10px] uppercase ${subCls}`}>away</div>
+                </div>
+              )
+            )
+          )}
+
+          {query.trim().length >= 2 && results.length === 0 && !isLoading && (
+            <div className={`p-5 text-center font-medium ${subCls}`}>
               No places found for &quot;{query}&quot;. Try another name or drop a PIN below.
             </div>
           )}
 
-          {/* Popular Presets when query is short */}
           {query.trim().length < 2 &&
-            PRESET_DESTINATIONS.map((preset, idx) => (
-              <button
-                key={idx}
-                onMouseDown={() => handleSelect(preset.lat, preset.lng, preset.name)}
-                className={`w-full text-left p-3.5 sm:p-4 transition-colors flex items-center justify-between gap-3 border-b ${
-                  nightMode
-                    ? 'hover:bg-neutral-900 active:bg-blue-950/60 border-neutral-800/80 text-white'
-                    : 'hover:bg-slate-50 active:bg-blue-50 border-slate-200 text-slate-900'
-                }`}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="text-lg sm:text-xl font-bold truncate">
-                    {preset.name}
-                  </div>
-                  <div
-                    className={`text-xs sm:text-sm truncate mt-0.5 ${
-                      nightMode ? 'text-neutral-400' : 'text-slate-500'
-                    }`}
-                  >
-                    {preset.sub}
-                  </div>
-                </div>
-                <div
-                  className={`font-bold text-xl px-2 ${
-                    nightMode ? 'text-neutral-500' : 'text-slate-400'
-                  }`}
-                >
-                  ›
-                </div>
-              </button>
-            ))}
+            PRESET_DESTINATIONS.map((p, idx) =>
+              row(
+                idx,
+                p.name,
+                p.sub,
+                p.lat,
+                p.lng,
+                <div className={`font-bold text-xl px-2 ${nightMode ? 'text-neutral-500' : 'text-slate-400'}`}>›</div>
+              )
+            )}
         </div>
       )}
     </div>

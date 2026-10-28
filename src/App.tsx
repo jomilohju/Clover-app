@@ -2,7 +2,6 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GeoLocation, RouteData, RouteStep } from './types/navigation';
 import { NavigationMap } from './components/NavigationMap';
@@ -10,36 +9,43 @@ import { TopTurnBar } from './components/TopTurnBar';
 import { TopSearchBar } from './components/TopSearchBar';
 import { BottomNavHud } from './components/BottomNavHud';
 import { PinDropOverlay } from './components/PinDropOverlay';
+import { WelcomeScreen } from './components/WelcomeScreen';
+import { HistoryModal } from './components/HistoryModal';
 import { fetchRoute } from './services/routing';
 import { voiceGuidance } from './services/voiceGuidance';
-import {
-  haversineDistance,
-  isOffRoute,
-  getVoiceAnnouncement,
-  getInstructionText,
-} from './utils/navigation';
+import { haversineDistance, isOffRoute, getVoiceAnnouncement, getInstructionText } from './utils/navigation';
+import { prefetchRouteTiles } from './utils/tileCache';
+import { loadTripHistory, recordCompletedTrip, deleteTripFromHistory, clearTripHistory } from './utils/tripHistory';
+import { CompletedTrip } from './types/navigation';
+
+type Timer = ReturnType<typeof setTimeout>;
+const isNightNow = () => { const h = new Date().getHours(); return h >= 18 || h < 6; };
+const nearestIdx = (coords: [number, number][], lat: number, lng: number) => {
+  let best = 0, bestD = Infinity;
+  for (let i = 0; i < coords.length; i++) {
+    const d = (coords[i][0] - lat) ** 2 + (coords[i][1] - lng) ** 2;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+};
+// Open the app with ?debug=1 to show the bench-test buttons
+const DEBUG = new URLSearchParams(window.location.search).get('debug') === '1';
+const dbgBtn: React.CSSProperties = { background: '#c026d3', color: '#fff', fontWeight: 700, padding: '10px 14px', borderRadius: 10 };
 
 export default function App() {
-  // Navigation & GPS State
-  const [currentLocation, setCurrentLocation] = useState<GeoLocation>({
-    lat: 6.5244,
-    lng: 3.3792,
-    heading: 0,
-    speed: 0,
-    accuracy: 8,
-  });
+  const [currentLocation, setCurrentLocation] = useState<GeoLocation>({ lat: 6.5244, lng: 3.3792, heading: 0, speed: 0, accuracy: 8 });
   const [gpsLocked, setGpsLocked] = useState(false);
+  const [gpsMessage, setGpsMessage] = useState<string | null>('Searching for GPS...');
   const [followCar, setFollowCar] = useState(true);
+  // Default to daylight (Google Maps palette) or respect saved user preference
   const [nightMode, setNightMode] = useState<boolean>(() => {
-    try {
-      const val = localStorage.getItem('carnav_night');
-      return val !== null ? val === 'true' : true;
-    } catch {
-      return true;
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('carnav_theme_mode');
+      if (saved === 'night') return true;
+      if (saved === 'day') return false;
     }
+    return false;
   });
-
-  // Route State
   const [routeData, setRouteData] = useState<RouteData | null>(null);
   const [isNavigating, setIsNavigating] = useState(false);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
@@ -51,156 +57,215 @@ export default function App() {
   const [isRerouting, setIsRerouting] = useState(false);
   const [hasArrived, setHasArrived] = useState(false);
   const [isMuted, setIsMuted] = useState(() => voiceGuidance.getMuted());
-
-  // Overlays & UI Modes
   const [isPinMode, setIsPinMode] = useState(false);
-  const [pinCenter, setPinCenter] = useState<{ lat: number; lng: number }>({
-    lat: 6.5244,
-    lng: 3.3792,
-  });
+  const [pinCenter, setPinCenter] = useState({ lat: 6.5244, lng: 3.3792 });
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const toastTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [online, setOnline] = useState<boolean>(navigator.onLine);
+  const [searchSignal, setSearchSignal] = useState(0);
+  const [viewMode, setViewMode] = useState<'welcome' | 'map'>('welcome');
+  const [tripHistory, setTripHistory] = useState<CompletedTrip[]>(() => loadTripHistory());
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const needsRerouteRef = useRef(false);
+  const restoredRef = useRef(false);
+  const hasDepartedRef = useRef(false);
+
+  const toastTimerRef = useRef<Timer | null>(null);
+  const simIndexRef = useRef(0);
+  const simTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const offRouteCountRef = useRef(0);
+  const isReroutingRef = useRef(false);
+  const lastRerouteRef = useRef(0);
+  const lastEvalLocRef = useRef<GeoLocation | null>(null);
+  const lastMilestoneRef = useRef<number | null>(null);
+  const lastStepIndexRef = useRef(0);
+  const autoRecenterTimerRef = useRef<Timer | null>(null);
+  const lastFixRef = useRef(0);
+  const speedRef = useRef(0);
+  speedRef.current = currentLocation.speed || 0;
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = setTimeout(() => {
-      setToastMessage(null);
-    }, 4500);
+    toastTimerRef.current = setTimeout(() => setToastMessage(null), 4500);
   }, []);
 
-  // Simulation / Test Drive state
-  const [isSimulating, setIsSimulating] = useState(false);
-  const simIndexRef = useRef<number>(0);
-  const simTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  // References to track consecutive off-route fixes
-  const offRouteCountRef = useRef<number>(0);
-  const isReroutingRef = useRef<boolean>(false);
-  const lastMilestoneRef = useRef<number | null>(null);
-  const lastStepIndexRef = useRef<number>(0);
-  const autoRecenterTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Watch real Geolocation
+  // Real GPS. FIX: errors and lost signal are now shown on screen.
   useEffect(() => {
-    if (!navigator.geolocation) return;
-
-    const watchId = navigator.geolocation.watchPosition(
+    if (!navigator.geolocation) { setGpsMessage('This browser has no GPS support.'); return; }
+    const id = navigator.geolocation.watchPosition(
       (pos) => {
-        // If simulation is active, ignore real GPS updates during test
         if (isSimulating) return;
-
-        const coords = pos.coords;
+        const c = pos.coords;
+        lastFixRef.current = Date.now();
         setGpsLocked(true);
-
+        setGpsMessage(null);
         setCurrentLocation((prev) => {
-          let heading = coords.heading;
-          // Calculate heading from consecutive coordinates if GPS heading is null
+          let heading = c.heading;
           if ((heading === null || isNaN(heading)) && prev) {
-            const dLat = coords.latitude - prev.lat;
-            const dLng = coords.longitude - prev.lng;
+            const dLat = c.latitude - prev.lat;
+            const dLng = c.longitude - prev.lng;
             if (Math.hypot(dLat, dLng) > 0.00005) {
-              const rad = Math.atan2(dLng, dLat);
-              heading = ((rad * 180) / Math.PI + 360) % 360;
+              heading = ((Math.atan2(dLng, dLat) * 180) / Math.PI + 360) % 360;
             } else {
               heading = prev.heading ?? null;
             }
           }
-
           return {
-            lat: coords.latitude,
-            lng: coords.longitude,
+            lat: c.latitude,
+            lng: c.longitude,
             heading: heading !== undefined ? heading : null,
-            speed: coords.speed !== null && !isNaN(coords.speed) ? coords.speed : 0,
-            accuracy: coords.accuracy || 10,
+            speed: c.speed !== null && !isNaN(c.speed) ? c.speed : 0,
+            accuracy: c.accuracy || 10,
           };
         });
       },
       (err) => {
-        console.warn('Geolocation error:', err.message);
+        setGpsMessage(
+          err.code === 1
+            ? 'Location is blocked. Allow location for this site in Chrome settings.'
+            : err.code === 2
+              ? 'GPS signal unavailable.'
+              : 'Searching for GPS...'
+        );
       },
-      {
-        enableHighAccuracy: true,
-        maximumAge: 0,
-        timeout: 20000,
-      }
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
     );
-
-    return () => {
-      navigator.geolocation.clearWatch(watchId);
-    };
+    return () => navigator.geolocation.clearWatch(id);
   }, [isSimulating]);
 
-  // Turn-by-turn guidance and off-route evaluation on location update
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!isSimulating && lastFixRef.current && Date.now() - lastFixRef.current > 10000) {
+        setGpsMessage('GPS lost. Searching...');
+      }
+    }, 3000);
+    return () => clearInterval(t);
+  }, [isSimulating]);
+
+
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => {
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
+    };
+  }, []);
+
+  const triggerReroute = async (loc: GeoLocation, currentRoute: RouteData) => {
+    if (isReroutingRef.current) return;
+    if (!navigator.onLine) {
+      needsRerouteRef.current = true;
+      lastRerouteRef.current = Date.now();
+      showToast('Off route, but there is no data to recalculate. Will retry when signal returns.');
+      return;
+    }
+    isReroutingRef.current = true;
+    lastRerouteRef.current = Date.now(); // FIX: cooldown starts even if the reroute fails
+    setIsRerouting(true);
+    voiceGuidance.speak('Off route. Recalculating route.');
+    try {
+      const [destLat, destLng] = currentRoute.destinationCoords;
+      const newRoute = await fetchRoute(loc.lat, loc.lng, destLat, destLng, currentRoute.destinationName);
+      setRouteData(newRoute);
+      setCurrentStepIndex(0);
+      lastStepIndexRef.current = 0;
+      lastMilestoneRef.current = null;
+      offRouteCountRef.current = 0;
+      setIsOffRouteState(false);
+      if (newRoute.steps && newRoute.steps.length > 0) {
+        voiceGuidance.speak(`New route calculated. ${getInstructionText(newRoute.steps[0])}`);
+      }
+    } catch (err) {
+      console.error('Auto-reroute failed:', err);
+      showToast('Could not recalculate the route. Check your data connection.');
+    } finally {
+      setIsRerouting(false);
+      isReroutingRef.current = false;
+    }
+  };
+
   const updateNavigationProgress = useCallback(
     (loc: GeoLocation, route: RouteData, stepIdx: number) => {
       if (!route.steps || route.steps.length === 0) return;
-
       const currentStep = route.steps[stepIdx];
       if (!currentStep) return;
 
-      // Distance to next turn maneuver
       const [turnLon, turnLat] = currentStep.maneuver.location;
       const distToTurn = haversineDistance(loc.lat, loc.lng, turnLat, turnLon);
       setDistanceToTurn(distToTurn);
 
-      // Check step advance condition (within 35 meters of maneuver point)
-      if (distToTurn < 35 && stepIdx < route.steps.length - 1) {
-        const nextIdx = stepIdx + 1;
-        setCurrentStepIndex(nextIdx);
-        lastStepIndexRef.current = nextIdx;
-        lastMilestoneRef.current = null; // reset voice milestone for next step
+      // Ground distance to the actual destination coordinates
+      const [destLat, destLng] = route.destinationCoords;
+      const distToDest = haversineDistance(loc.lat, loc.lng, destLat, destLng);
 
-        // Speak instruction for next step
-        const nextStep = route.steps[nextIdx];
-        if (nextStep) {
-          const instruction = getInstructionText(nextStep);
-          voiceGuidance.speak(instruction);
+      // Track departure: car must depart from the starting coordinate
+      if (!hasDepartedRef.current && route.coordinates.length > 0) {
+        const startPt = route.coordinates[0];
+        const distFromStart = haversineDistance(loc.lat, loc.lng, startPt[0], startPt[1]);
+        if (distFromStart > 25) {
+          hasDepartedRef.current = true;
         }
+      }
+
+      // Advance to the next maneuver. No premature announcement here
+      if (distToTurn < 35 && stepIdx < route.steps.length - 1) {
+        setCurrentStepIndex(stepIdx + 1);
+        lastStepIndexRef.current = stepIdx + 1;
+        lastMilestoneRef.current = null;
         return;
       }
 
-      // Check arrival
-      if (stepIdx === route.steps.length - 1 && distToTurn < 40) {
+      // Arrival check: never trigger on step 0 departure location
+      const isFinalStep = stepIdx >= route.steps.length - 1;
+      const canTriggerArrival =
+        route.steps.length > 1
+          ? isFinalStep && distToDest <= 35
+          : hasDepartedRef.current && distToDest <= 30;
+
+      if (canTriggerArrival) {
         if (!hasArrived) {
           setHasArrived(true);
           voiceGuidance.speak('You have arrived at your destination.');
+          recordCompletedTrip(route);
+          setTripHistory(loadTripHistory());
         }
         return;
       }
 
-      // Voice Guidance announcement milestone check
       if (lastStepIndexRef.current !== stepIdx) {
         lastStepIndexRef.current = stepIdx;
         lastMilestoneRef.current = null;
       }
-
       const voiceAlert = getVoiceAnnouncement(distToTurn, currentStep, lastMilestoneRef.current);
       if (voiceAlert) {
         lastMilestoneRef.current = voiceAlert.milestone;
         voiceGuidance.speak(voiceAlert.text);
       }
 
-      // Calculate total remaining distance and duration
+      // FIX: start at stepIdx so the leg after the upcoming turn is counted
       let sumDistance = distToTurn;
       let sumDuration = 0;
-      for (let i = stepIdx + 1; i < route.steps.length; i++) {
+      for (let i = stepIdx; i < route.steps.length; i++) {
         sumDistance += route.steps[i].distance;
         sumDuration += route.steps[i].duration;
       }
       setRemainingDistance(sumDistance);
-
-      // Remaining duration: adjust if moving or based on distance
       const remainingSeconds = Math.max(30, Math.round(sumDuration));
       setRemainingDuration(remainingSeconds);
       setEta(new Date(Date.now() + remainingSeconds * 1000));
 
-      // Off-route check
+      // FIX: only count new GPS fixes, scale the threshold with accuracy, add a reroute cooldown
       if (route.coordinates.length > 2 && !isReroutingRef.current) {
-        const off = isOffRoute(loc, route.coordinates, 45); // 45m threshold
-        if (off) {
-          offRouteCountRef.current += 1;
-          if (offRouteCountRef.current >= 2) {
+        const isNewFix = lastEvalLocRef.current !== loc;
+        lastEvalLocRef.current = loc;
+        const threshold = Math.max(45, (loc.accuracy || 10) * 2);
+        if (isOffRoute(loc, route.coordinates, threshold)) {
+          if (isNewFix) offRouteCountRef.current += 1;
+          if (offRouteCountRef.current >= 3 && Date.now() - lastRerouteRef.current > 15000) {
             setIsOffRouteState(true);
             triggerReroute(loc, route);
           }
@@ -213,90 +278,92 @@ export default function App() {
     [hasArrived]
   );
 
-  // Trigger Automatic Reroute
-  const triggerReroute = async (loc: GeoLocation, currentRoute: RouteData) => {
-    if (isReroutingRef.current) return;
-    isReroutingRef.current = true;
-    setIsRerouting(true);
-    voiceGuidance.speak('Off route. Recalculating route.');
-
-    try {
-      const [destLat, destLng] = currentRoute.destinationCoords;
-      const newRoute = await fetchRoute(
-        loc.lat,
-        loc.lng,
-        destLat,
-        destLng,
-        currentRoute.destinationName
-      );
-
-      setRouteData(newRoute);
-      setCurrentStepIndex(0);
-      lastStepIndexRef.current = 0;
-      lastMilestoneRef.current = null;
-      offRouteCountRef.current = 0;
-      setIsOffRouteState(false);
-
-      if (newRoute.steps && newRoute.steps.length > 0) {
-        const firstStep = newRoute.steps[0];
-        voiceGuidance.speak(`New route calculated. ${getInstructionText(firstStep)}`);
-      }
-    } catch (err) {
-      console.error('Auto-reroute failed:', err);
-    } finally {
-      setIsRerouting(false);
-      isReroutingRef.current = false;
-    }
-  };
-
-  // Run progress evaluation whenever current location changes while navigating
   useEffect(() => {
-    if (isNavigating && routeData) {
-      updateNavigationProgress(currentLocation, routeData, currentStepIndex);
-    }
+    if (isNavigating && routeData) updateNavigationProgress(currentLocation, routeData, currentStepIndex);
   }, [currentLocation, isNavigating, routeData, currentStepIndex, updateNavigationProgress]);
 
-  // Handle plan & start navigation
-  const handleStartRoute = async (destLat: number, destLng: number, destName: string) => {
+  // When data returns after an off-route moment, recalculate straight away
+  useEffect(() => {
+    if (online && needsRerouteRef.current && routeData && isNavigating) {
+      needsRerouteRef.current = false;
+      triggerReroute(currentLocation, routeData);
+    }
+  }, [online]);
+
+  // Save the route so a reloaded browser tab can pick up where it left off
+  useEffect(() => {
+    if (!isNavigating || !routeData) return;
+    try {
+      const slim = { ...routeData, steps: routeData.steps.map(({ geometry, ...s }) => s) };
+      localStorage.setItem('carnav_route', JSON.stringify(slim));
+    } catch { /* storage full or blocked */ }
+  }, [isNavigating, routeData]);
+
+  // After the first real GPS fix, resume a saved route from the right turn
+  useEffect(() => {
+    if (restoredRef.current || !gpsLocked) return;
+    restoredRef.current = true;
+    try {
+      const raw = localStorage.getItem('carnav_route');
+      if (!raw) return;
+      const saved: RouteData = JSON.parse(raw);
+      const [dLat, dLng] = saved.destinationCoords;
+      if (haversineDistance(currentLocation.lat, currentLocation.lng, dLat, dLng) < 100) {
+        localStorage.removeItem('carnav_route');
+        return;
+      }
+      const carI = nearestIdx(saved.coordinates, currentLocation.lat, currentLocation.lng);
+      let idx = saved.steps.length - 1;
+      for (let i = 1; i < saved.steps.length; i++) {
+        const [lo, la] = saved.steps[i].maneuver.location;
+        if (nearestIdx(saved.coordinates, la, lo) > carI) { idx = i; break; }
+      }
+      setRouteData(saved);
+      setCurrentStepIndex(idx);
+      lastStepIndexRef.current = idx;
+      setHasArrived(false);
+      setIsNavigating(true);
+      showToast('Resumed route to ' + saved.destinationName);
+    } catch { try { localStorage.removeItem('carnav_route'); } catch { /* ignore */ } }
+  }, [gpsLocked]);
+
+  // Save the map tiles along each new route
+  useEffect(() => {
+    if (routeData) prefetchRouteTiles(routeData.coordinates, nightMode);
+  }, [routeData]);
+
+  // FIX: refuses to start from the placeholder Lagos position before the first real GPS fix
+  const handleStartRoute = async (destLat: number, destLng: number, destName: string, force = false) => {
+    if (!gpsLocked && !force) {
+      showToast('Waiting for GPS signal. Try again in a moment.');
+      return;
+    }
     try {
       setIsPinMode(false);
       setIsNavigating(false);
       setHasArrived(false);
       setIsOffRouteState(false);
-
-      const route = await fetchRoute(
-        currentLocation.lat,
-        currentLocation.lng,
-        destLat,
-        destLng,
-        destName
-      );
-
+      hasDepartedRef.current = false;
+      setViewMode('map');
+      const route = await fetchRoute(currentLocation.lat, currentLocation.lng, destLat, destLng, destName);
       setRouteData(route);
       setCurrentStepIndex(0);
       lastStepIndexRef.current = 0;
       lastMilestoneRef.current = null;
       offRouteCountRef.current = 0;
+      lastRerouteRef.current = Date.now();
       setIsNavigating(true);
       setFollowCar(true);
-
-      // Initial voice announcement
       if (route.steps && route.steps.length > 0) {
-        const startStep = route.steps[0];
-        voiceGuidance.speak(`Starting route to ${destName}. ${getInstructionText(startStep)}`);
+        voiceGuidance.speak(`Starting route to ${destName}. ${getInstructionText(route.steps[0])}`);
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Routing error';
-      showToast(`Notice: ${msg}`);
+      showToast(`Notice: ${err instanceof Error ? err.message : 'Routing error'}`);
     }
   };
 
-  // End navigation
   const handleEndRoute = () => {
-    if (simTimerRef.current) {
-      clearInterval(simTimerRef.current);
-      simTimerRef.current = null;
-    }
+    if (simTimerRef.current) { clearInterval(simTimerRef.current); simTimerRef.current = null; }
     setIsSimulating(false);
     setIsNavigating(false);
     setRouteData(null);
@@ -304,78 +371,48 @@ export default function App() {
     setIsOffRouteState(false);
     setIsRerouting(false);
     setFollowCar(true);
+    try { localStorage.removeItem('carnav_route'); } catch { /* ignore */ }
     voiceGuidance.speak('Route ended.');
   };
 
-  // Toggle Day/Night theme
+  const handleToggleMute = () => setIsMuted(voiceGuidance.toggleMute());
+  const handleTestVoice = () => voiceGuidance.testVoice();
   const handleToggleNight = () => {
     setNightMode((prev) => {
       const next = !prev;
       try {
-        localStorage.setItem('carnav_night', next ? 'true' : 'false');
-      } catch {
-        // ignore
-      }
+        localStorage.setItem('carnav_theme_mode', next ? 'night' : 'day');
+      } catch { /* ignore */ }
       return next;
     });
   };
 
-  // Toggle Mute
-  const handleToggleMute = () => {
-    const muted = voiceGuidance.toggleMute();
-    setIsMuted(muted);
-  };
-
-  // Test Voice
-  const handleTestVoice = () => {
-    voiceGuidance.testVoice();
-  };
-
-  // User dragged or moved map
-  const handleUserMapInteraction = () => {
+  // FIX: uses speedRef (current speed), not the speed from when the map was touched
+  const handleUserMapInteraction = useCallback(() => {
     setFollowCar(false);
-
-    // Auto recenter after 12 seconds when moving (from Phase 1 spec)
-    if (autoRecenterTimerRef.current) {
-      clearTimeout(autoRecenterTimerRef.current);
-    }
+    if (autoRecenterTimerRef.current) clearTimeout(autoRecenterTimerRef.current);
     autoRecenterTimerRef.current = setTimeout(() => {
-      if (currentLocation.speed && currentLocation.speed > 1.5) {
-        setFollowCar(true);
-      }
+      if (speedRef.current > 1.5) setFollowCar(true);
     }, 12000);
-  };
+  }, []);
 
-  // Re-center on car
-  const handleRecenter = () => {
-    setFollowCar(true);
-  };
+  const handleRecenter = () => setFollowCar(true);
 
-  // Simulation / Bench-test driver loop
+  // Bench-test drive (shown with ?debug=1)
   const handleToggleSimulation = () => {
     if (isSimulating) {
-      if (simTimerRef.current) {
-        clearInterval(simTimerRef.current);
-        simTimerRef.current = null;
-      }
+      if (simTimerRef.current) { clearInterval(simTimerRef.current); simTimerRef.current = null; }
       setIsSimulating(false);
       return;
     }
-
     if (!routeData || routeData.coordinates.length < 2) {
-      // Default to planning a quick Lagos route to simulate if no route active
-      handleStartRoute(6.4283, 3.4219, 'Eko Hotel, Victoria Island');
+      handleStartRoute(6.4283, 3.4219, 'Eko Hotel, Victoria Island', true);
       return;
     }
-
     setIsSimulating(true);
     simIndexRef.current = 0;
-
     const coords = routeData.coordinates;
-    const intervalMs = 650;
-
     if (simTimerRef.current) clearInterval(simTimerRef.current);
-
     simTimerRef.current = setInterval(() => {
       const idx = simIndexRef.current;
       if (idx >= coords.length - 1) {
@@ -384,80 +421,63 @@ export default function App() {
         setIsSimulating(false);
         return;
       }
-
       const p1 = coords[idx];
       const p2 = coords[idx + 1];
-
-      // Calculate heading between coordinates
-      const dLat = p2[0] - p1[0];
-      const dLng = p2[1] - p1[1];
-      const rad = Math.atan2(dLng, dLat);
-      const heading = ((rad * 180) / Math.PI + 360) % 360;
-
-      // Simulated speed ~ 48 km/h (13.3 m/s)
-      setCurrentLocation({
-        lat: p2[0],
-        lng: p2[1],
-        heading,
-        speed: 13.5,
-        accuracy: 4,
-      });
-
+      const heading = ((Math.atan2(p2[1] - p1[1], p2[0] - p1[0]) * 180) / Math.PI + 360) % 360;
+      setCurrentLocation({ lat: p2[0], lng: p2[1], heading, speed: 13.5, accuracy: 4 });
       simIndexRef.current = idx + 1;
-    }, intervalMs);
+    }, 650);
   };
 
-  // Simulate off-route deviation for testing rerouting
   const handleTriggerOffRouteTest = () => {
-    if (!currentLocation) return;
-    // Shift current position ~150 meters away
-    const deviatedLoc: GeoLocation = {
-      ...currentLocation,
-      lat: currentLocation.lat + 0.0014, // ~150m north
-      lng: currentLocation.lng + 0.0014,
-    };
-    setCurrentLocation(deviatedLoc);
+    setCurrentLocation({ ...currentLocation, lat: currentLocation.lat + 0.0014, lng: currentLocation.lng + 0.0014 });
   };
 
-  // Pin mode actions
   const handleSetPinHere = () => {
+    const dist = haversineDistance(currentLocation.lat, currentLocation.lng, pinCenter.lat, pinCenter.lng);
+    if (dist < 40) {
+      showToast('Please pan the crosshair further from your current vehicle position to drop a pin.');
+      return;
+    }
     setIsPinMode(false);
     handleStartRoute(pinCenter.lat, pinCenter.lng, 'Dropped Pin');
   };
 
-  const handleCancelPin = () => {
-    setIsPinMode(false);
-  };
-
-  const currentStep: RouteStep | null =
-    routeData && routeData.steps && routeData.steps[currentStepIndex]
-      ? routeData.steps[currentStepIndex]
-      : null;
-
-  const upcomingStep: RouteStep | null =
-    routeData && routeData.steps && routeData.steps[currentStepIndex + 1]
-      ? routeData.steps[currentStepIndex + 1]
-      : null;
-
+  const banner = [gpsMessage && !isSimulating ? gpsMessage : null, !online ? 'No data. Guidance continues on your saved route.' : null].filter(Boolean).join('   |   ');
+  const currentStep: RouteStep | null = routeData?.steps?.[currentStepIndex] ?? null;
+  const upcomingStep: RouteStep | null = routeData?.steps?.[currentStepIndex + 1] ?? null;
   const speedKmh = (currentLocation.speed || 0) * 3.6;
 
   return (
-    <div
-      className={`relative w-screen h-screen overflow-hidden select-none font-sans transition-colors ${
-        nightMode ? 'bg-black text-white' : 'bg-slate-100 text-slate-900'
-      }`}
-    >
-      {/* Destination Search Bar on Top (Fixed GPS origin, destination input) */}
-      {!isNavigating && (
-        <TopSearchBar
-          userLocation={currentLocation}
-          onSelectDestination={(lat, lng, name) => handleStartRoute(lat, lng, name)}
-          isPinMode={isPinMode}
-          nightMode={nightMode}
-        />
+    <div className={`relative w-screen h-screen overflow-hidden select-none font-sans ${nightMode ? 'bg-black text-white' : 'bg-slate-100 text-slate-900'}`}>
+      {!isNavigating && viewMode === 'map' && (
+        <>
+          <button
+            onClick={() => setViewMode('welcome')}
+            aria-label="Return to Welcome screen"
+            className="fixed top-3 left-3 sm:left-6 z-1100 flex items-center gap-2 h-16 px-3.5 sm:px-4 rounded-2xl border-2 shadow-lg backdrop-blur-md transition-all active:scale-95"
+            style={{
+              background: nightMode ? 'rgba(10, 15, 29, 0.95)' : 'rgba(255, 255, 255, 0.98)',
+              borderColor: nightMode ? '#374151' : '#cbd5e1',
+              color: nightMode ? '#f8fafc' : '#0f172a',
+            }}
+          >
+            <span className="text-2xl leading-none" role="img" aria-label="four leaf clover">🍀</span>
+            <span className="font-black text-sm sm:text-base tracking-tight hidden sm:inline">Clover app</span>
+          </button>
+
+          <TopSearchBar
+            userLocation={currentLocation}
+            gpsLocked={gpsLocked}
+            openSignal={searchSignal}
+            onStartPinMode={() => setIsPinMode(true)}
+            onSelectDestination={(lat, lng, name) => handleStartRoute(lat, lng, name)}
+            isPinMode={isPinMode}
+            nightMode={nightMode}
+          />
+        </>
       )}
 
-      {/* Turn-by-turn Top Bar HUD */}
       {isNavigating && (
         <TopTurnBar
           distanceToTurn={distanceToTurn}
@@ -473,7 +493,6 @@ export default function App() {
         />
       )}
 
-      {/* Main Map Canvas */}
       <main className="w-full h-full">
         <NavigationMap
           currentLocation={currentLocation}
@@ -486,19 +505,13 @@ export default function App() {
           onMapCenterChange={(lat, lng) => setPinCenter({ lat, lng })}
           gpsAccuracy={currentLocation.accuracy}
           speedKmh={speedKmh}
+          hideControls={viewMode === 'welcome'}
         />
       </main>
 
-      {/* Pin Drop Crosshair Overlay */}
-      <PinDropOverlay
-        isActive={isPinMode}
-        onSetHere={handleSetPinHere}
-        onCancel={handleCancelPin}
-        nightMode={nightMode}
-      />
+      <PinDropOverlay isActive={isPinMode} onSetHere={handleSetPinHere} onCancel={() => setIsPinMode(false)} nightMode={nightMode} />
 
-      {/* Bottom Dashboard Bar HUD */}
-      {!isPinMode && (
+      {!isPinMode && viewMode === 'map' && (
         <BottomNavHud
           isNavigating={isNavigating}
           speedKmh={speedKmh}
@@ -507,30 +520,74 @@ export default function App() {
           eta={eta}
           nightMode={nightMode}
           followCar={followCar}
+          isMuted={isMuted}
           destinationName={routeData?.destinationName}
-          onEndRoute={handleEndRoute}
+          onSearch={() => setSearchSignal((n) => n + 1)}
           onStartPinMode={() => setIsPinMode(true)}
+          onOpenHistory={() => setIsHistoryOpen(true)}
           onToggleNight={handleToggleNight}
+          onToggleMute={handleToggleMute}
+          onEndRoute={handleEndRoute}
           onRecenter={handleRecenter}
         />
       )}
 
-      {/* Non-intrusive status toast notification */}
+      {/* Welcome Home Screen */}
+      {viewMode === 'welcome' && (
+        <WelcomeScreen
+          onOpenMap={() => setViewMode('map')}
+          onSelectDestination={(lat, lng, name) => {
+            setViewMode('map');
+            handleStartRoute(lat, lng, name);
+          }}
+          onStartPinMode={() => {
+            setViewMode('map');
+            setIsPinMode(true);
+          }}
+          onOpenHistory={() => setIsHistoryOpen(true)}
+          currentLocation={currentLocation}
+          recentTrips={tripHistory}
+          nightMode={nightMode}
+          onToggleNight={handleToggleNight}
+          gpsLocked={gpsLocked}
+        />
+      )}
+
+      {/* Completed Trip History Modal */}
+      <HistoryModal
+        isOpen={isHistoryOpen}
+        onClose={() => setIsHistoryOpen(false)}
+        trips={tripHistory}
+        onSelectTrip={(trip) => {
+          setViewMode('map');
+          handleStartRoute(trip.destinationCoords[0], trip.destinationCoords[1], trip.destinationName, true);
+        }}
+        onDeleteTrip={(id) => setTripHistory(deleteTripFromHistory(id))}
+        onClearAll={() => {
+          clearTripHistory();
+          setTripHistory([]);
+        }}
+        nightMode={nightMode}
+      />
+
+      {banner && viewMode === 'map' && (
+        <div role="alert" className="fixed left-0 right-0 bottom-28 z-2000 text-center font-bold text-lg py-2" style={{ background: '#f59e0b', color: '#000' }}>
+          {banner}
+        </div>
+      )}
+
+      {DEBUG && viewMode === 'map' && (
+        <div className="fixed right-3 top-40 z-2000 flex flex-col gap-2">
+          <button style={dbgBtn} onClick={handleToggleSimulation}>{isSimulating ? 'STOP SIM' : 'SIM DRIVE'}</button>
+          <button style={dbgBtn} onClick={handleTriggerOffRouteTest}>OFF ROUTE</button>
+          <button style={dbgBtn} onClick={handleTestVoice}>VOICE</button>
+        </div>
+      )}
+
       {toastMessage && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="fixed bottom-24 left-1/2 -translate-x-1/2 z-2000 bg-neutral-900 text-white border-2 border-neutral-600 px-5 py-3 rounded-2xl shadow-2xl font-bold text-sm sm:text-base flex items-center gap-3 animate-fade-in"
-        >
-          <span className="text-amber-400">ℹ️</span>
+        <div role="status" aria-live="polite" className="fixed bottom-24 left-1/2 -translate-x-1/2 z-2000 border-2 px-5 py-3 rounded-2xl font-bold flex items-center gap-3" style={{ background: '#171717', borderColor: '#525252', color: '#fff' }}>
           <span>{toastMessage}</span>
-          <button
-            onClick={() => setToastMessage(null)}
-            className="ml-2 text-neutral-400 hover:text-white"
-            aria-label="Dismiss toast"
-          >
-            ✕
-          </button>
+          <button onClick={() => setToastMessage(null)} aria-label="Dismiss">✕</button>
         </div>
       )}
     </div>

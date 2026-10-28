@@ -35,7 +35,8 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="history-modal-title"
-      className="fixed inset-0 z-2000 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm select-none animate-fadeIn"
+      className="fixed inset-0 z-9999 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm select-none animate-fadeIn"
+      style={{ zIndex: 10000, position: 'fixed', inset: 0 }}
       onClick={onClose}
     >
       <div

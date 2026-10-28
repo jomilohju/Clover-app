@@ -63,8 +63,19 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-1500 flex flex-col justify-between overflow-y-auto select-none transition-colors duration-300"
-      style={{ background: bgCanvas, color: textPrimary }}
+      className="fixed inset-0 z-9999 flex flex-col justify-between overflow-y-auto select-none"
+      style={{
+        background: bgCanvas,
+        color: textPrimary,
+        zIndex: 9999,
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: '100vw',
+        height: '100vh',
+      }}
     >
       {/* Top Bar with Branding */}
       <header className="w-full max-w-5xl mx-auto flex items-center justify-between px-6 py-5 shrink-0">

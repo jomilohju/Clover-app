@@ -299,33 +299,15 @@ export default function App() {
     } catch { /* storage full or blocked */ }
   }, [isNavigating, routeData]);
 
-  // After the first real GPS fix, resume a saved route from the right turn
+  // On fresh app launch, clear any leftover partial route from earlier sessions
+  // so the Welcome Screen is always displayed cleanly on entry
   useEffect(() => {
-    if (restoredRef.current || !gpsLocked) return;
-    restoredRef.current = true;
     try {
-      const raw = localStorage.getItem('carnav_route');
-      if (!raw) return;
-      const saved: RouteData = JSON.parse(raw);
-      const [dLat, dLng] = saved.destinationCoords;
-      if (haversineDistance(currentLocation.lat, currentLocation.lng, dLat, dLng) < 100) {
-        localStorage.removeItem('carnav_route');
-        return;
-      }
-      const carI = nearestIdx(saved.coordinates, currentLocation.lat, currentLocation.lng);
-      let idx = saved.steps.length - 1;
-      for (let i = 1; i < saved.steps.length; i++) {
-        const [lo, la] = saved.steps[i].maneuver.location;
-        if (nearestIdx(saved.coordinates, la, lo) > carI) { idx = i; break; }
-      }
-      setRouteData(saved);
-      setCurrentStepIndex(idx);
-      lastStepIndexRef.current = idx;
-      setHasArrived(false);
-      setIsNavigating(true);
-      showToast('Resumed route to ' + saved.destinationName);
-    } catch { try { localStorage.removeItem('carnav_route'); } catch { /* ignore */ } }
-  }, [gpsLocked]);
+      localStorage.removeItem('carnav_route');
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   // Save the map tiles along each new route
   useEffect(() => {
@@ -478,7 +460,7 @@ export default function App() {
         </>
       )}
 
-      {isNavigating && (
+      {isNavigating && viewMode === 'map' && (
         <TopTurnBar
           distanceToTurn={distanceToTurn}
           currentStep={currentStep}
@@ -493,7 +475,13 @@ export default function App() {
         />
       )}
 
-      <main className="w-full h-full">
+      <main
+        className="w-full h-full"
+        style={{
+          visibility: viewMode === 'welcome' ? 'hidden' : 'visible',
+          pointerEvents: viewMode === 'welcome' ? 'none' : 'auto',
+        }}
+      >
         <NavigationMap
           currentLocation={currentLocation}
           routeData={routeData}
@@ -509,7 +497,7 @@ export default function App() {
         />
       </main>
 
-      <PinDropOverlay isActive={isPinMode} onSetHere={handleSetPinHere} onCancel={() => setIsPinMode(false)} nightMode={nightMode} />
+      <PinDropOverlay isActive={isPinMode && viewMode === 'map'} onSetHere={handleSetPinHere} onCancel={() => setIsPinMode(false)} nightMode={nightMode} />
 
       {!isPinMode && viewMode === 'map' && (
         <BottomNavHud

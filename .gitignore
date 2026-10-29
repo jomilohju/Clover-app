@@ -5,5 +5,16 @@ coverage/
 .DS_Store
 *.log
 .env*
+
+# AI Studio system, temporary, and exported artifacts
+*aistudio*
+*aistudio*/**
+**/*aistudio*
+**/*aistudio*/**
 .aistudio/
+*.aistudio/
+assets/aistudio/
 public/assets/aistudio/
+**/assets/aistudio/**
+**/aistudio/**
+

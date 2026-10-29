@@ -142,6 +142,20 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
         live.current.onMapCenterChange?.(c.lat, c.lng);
       }
     });
+    map.on('moveend', () => {
+      if (live.current.isPinMode) {
+        const c = map.getCenter();
+        live.current.onMapCenterChange?.(c.lat, c.lng);
+      }
+    });
+    // Allow tapping or clicking anywhere on the map to place the pin
+    map.on('click', (e: L.LeafletMouseEvent) => {
+      if (live.current.isPinMode) {
+        live.current.onUserMapInteraction();
+        live.current.onMapCenterChange?.(e.latlng.lat, e.latlng.lng);
+        map.panTo(e.latlng, { animate: true });
+      }
+    });
 
     carMarkerRef.current = L.marker([lat, lng], {
       interactive: false,
@@ -180,14 +194,19 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     }
   }, [nightMode]);
 
-  // FIX: entering pin mode reports the current crosshair position straight away
+  // Entering pin mode or toggling controls: invalidate map container size and report crosshair center
   useEffect(() => {
     const map = mapRef.current;
-    if (isPinMode && map) {
-      const c = map.getCenter();
-      onMapCenterChange?.(c.lat, c.lng);
-    }
-  }, [isPinMode]);
+    if (!map) return;
+    const t = setTimeout(() => {
+      map.invalidateSize();
+      if (isPinMode) {
+        const c = map.getCenter();
+        onMapCenterChange?.(c.lat, c.lng);
+      }
+    }, 60);
+    return () => clearTimeout(t);
+  }, [isPinMode, hideControls]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -199,8 +218,8 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     if (!initialViewSetRef.current) {
       initialViewSetRef.current = true;
       map.setView(ll, 16, { animate: false });
-    } else if (followCar) {
-      // Lazy follow: move the map only when the car is far from the centre (far fewer redraws and tile loads)
+    } else if (followCar && !isPinMode) {
+      // Lazy follow: move the map only when the car is far from the centre and NOT in pin mode
       const car = map.latLngToContainerPoint(ll);
       const mid = map.getSize().divideBy(2);
       if (!wasFollowingRef.current || car.distanceTo(mid) > 110) {
@@ -209,7 +228,7 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
       }
     }
     wasFollowingRef.current = followCar;
-  }, [currentLocation, followCar]);
+  }, [currentLocation, followCar, isPinMode]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -244,7 +263,12 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     }).addTo(map);
     routeLayersRef.current = [outline, line, dest];
 
-    if (!followCar) map.fitBounds(line.getBounds(), { padding: [80, 80], animate: false });
+    // Zoom/fit map to show the newly calculated route polyline clearly
+    try {
+      map.fitBounds(line.getBounds(), { padding: [60, 60], maxZoom: 17, animate: true });
+    } catch {
+      /* ignore invalid bounds */
+    }
   }, [routeData, nightMode]);
 
   useEffect(() => {

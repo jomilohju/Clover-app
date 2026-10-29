@@ -194,37 +194,44 @@ export default function App() {
       const currentStep = route.steps[stepIdx];
       if (!currentStep) return;
 
-      const [turnLon, turnLat] = currentStep.maneuver.location;
-      const distToTurn = haversineDistance(loc.lat, loc.lng, turnLat, turnLon);
-      setDistanceToTurn(distToTurn);
-
       // Ground distance to the actual destination coordinates
       const [destLat, destLng] = route.destinationCoords;
       const distToDest = haversineDistance(loc.lat, loc.lng, destLat, destLng);
+
+      // Upcoming maneuver target:
+      // While on step i, the driver is approaching step i+1's turn maneuver location.
+      // If on the final step, the driver is approaching the destination coordinates.
+      const nextStep = route.steps[stepIdx + 1];
+      let targetLat = destLat;
+      let targetLng = destLng;
+      if (nextStep && nextStep.maneuver && nextStep.maneuver.location) {
+        targetLng = nextStep.maneuver.location[0];
+        targetLat = nextStep.maneuver.location[1];
+      }
+
+      const distToTurn = haversineDistance(loc.lat, loc.lng, targetLat, targetLng);
+      setDistanceToTurn(distToTurn);
 
       // Track departure: car must depart from the starting coordinate
       if (!hasDepartedRef.current && route.coordinates.length > 0) {
         const startPt = route.coordinates[0];
         const distFromStart = haversineDistance(loc.lat, loc.lng, startPt[0], startPt[1]);
-        if (distFromStart > 25) {
+        if (distFromStart > 20) {
           hasDepartedRef.current = true;
         }
       }
 
-      // Advance to the next maneuver. No premature announcement here
-      if (distToTurn < 35 && stepIdx < route.steps.length - 1) {
+      // Advance to the next maneuver when within 30m of the upcoming turn
+      if (distToTurn < 30 && stepIdx < route.steps.length - 1) {
         setCurrentStepIndex(stepIdx + 1);
         lastStepIndexRef.current = stepIdx + 1;
         lastMilestoneRef.current = null;
         return;
       }
 
-      // Arrival check: never trigger on step 0 departure location
+      // Arrival check: NEVER trigger arrival until the vehicle has actually departed the start point
       const isFinalStep = stepIdx >= route.steps.length - 1;
-      const canTriggerArrival =
-        route.steps.length > 1
-          ? isFinalStep && distToDest <= 35
-          : hasDepartedRef.current && distToDest <= 30;
+      const canTriggerArrival = hasDepartedRef.current && isFinalStep && distToDest <= 30;
 
       if (canTriggerArrival) {
         if (!hasArrived) {
@@ -417,12 +424,12 @@ export default function App() {
 
   const handleSetPinHere = () => {
     const dist = haversineDistance(currentLocation.lat, currentLocation.lng, pinCenter.lat, pinCenter.lng);
-    if (dist < 40) {
-      showToast('Please pan the crosshair further from your current vehicle position to drop a pin.');
+    if (dist < 15) {
+      showToast('Please pan crosshair or tap the map further from your vehicle to drop a pin.');
       return;
     }
     setIsPinMode(false);
-    handleStartRoute(pinCenter.lat, pinCenter.lng, 'Dropped Pin');
+    handleStartRoute(pinCenter.lat, pinCenter.lng, 'Dropped Pin', true);
   };
 
   const banner = [gpsMessage && !isSimulating ? gpsMessage : null, !online ? 'No data. Guidance continues on your saved route.' : null].filter(Boolean).join('   |   ');
@@ -497,7 +504,13 @@ export default function App() {
         />
       </main>
 
-      <PinDropOverlay isActive={isPinMode && viewMode === 'map'} onSetHere={handleSetPinHere} onCancel={() => setIsPinMode(false)} nightMode={nightMode} />
+      <PinDropOverlay
+        isActive={isPinMode && viewMode === 'map'}
+        onSetHere={handleSetPinHere}
+        onCancel={() => setIsPinMode(false)}
+        nightMode={nightMode}
+        distanceMeters={haversineDistance(currentLocation.lat, currentLocation.lng, pinCenter.lat, pinCenter.lng)}
+      />
 
       {!isPinMode && viewMode === 'map' && (
         <BottomNavHud

@@ -5,6 +5,7 @@ interface PinDropOverlayProps {
   onSetHere: () => void;
   onCancel: () => void;
   nightMode?: boolean;
+  distanceMeters?: number;
 }
 
 export const PinDropOverlay: React.FC<PinDropOverlayProps> = ({
@@ -12,6 +13,7 @@ export const PinDropOverlay: React.FC<PinDropOverlayProps> = ({
   onSetHere,
   onCancel,
   nightMode = true,
+  distanceMeters,
 }) => {
   if (!isActive) return null;
 
@@ -39,9 +41,16 @@ export const PinDropOverlay: React.FC<PinDropOverlayProps> = ({
         }`}
       >
         <div className="text-left px-2">
-          <div className="text-lg font-bold">Move map to target</div>
+          <div className="text-base sm:text-lg font-bold flex items-center gap-2">
+            <span>Move map or tap target</span>
+            {distanceMeters !== undefined && distanceMeters >= 15 && (
+              <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                {distanceMeters < 1000 ? `${Math.round(distanceMeters)} m` : `${(distanceMeters / 1000).toFixed(1)} km`}
+              </span>
+            )}
+          </div>
           <div className={`text-xs ${nightMode ? 'text-neutral-400' : 'text-slate-500'}`}>
-            Position the crosshair at your destination
+            Tap map or drag crosshair to destination, then tap SET HERE
           </div>
         </div>
 

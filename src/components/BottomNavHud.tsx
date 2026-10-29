@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 
 interface BottomNavHudProps {
   isNavigating: boolean;
@@ -40,6 +40,54 @@ export const BottomNavHud: React.FC<BottomNavHudProps> = ({
   onEndRoute,
   onRecenter,
 }) => {
+  const [battery, setBattery] = useState<{ level: number; charging: boolean } | null>(() => {
+    if (typeof window !== 'undefined') {
+      const param = new URLSearchParams(window.location.search).get('battery');
+      if (param !== null) {
+        const val = parseInt(param, 10);
+        if (!isNaN(val)) return { level: Math.max(0, Math.min(100, val)), charging: false };
+      }
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    let isMounted = true;
+    let batteryManager: any = null;
+
+    const nav = typeof navigator !== 'undefined' ? (navigator as any) : null;
+    if (!nav || typeof nav.getBattery !== 'function') return;
+
+    const updateBattery = () => {
+      if (!batteryManager || !isMounted) return;
+      setBattery({
+        level: Math.round(batteryManager.level * 100),
+        charging: Boolean(batteryManager.charging),
+      });
+    };
+
+    nav.getBattery()
+      .then((bm: any) => {
+        if (!isMounted) return;
+        batteryManager = bm;
+        updateBattery();
+        bm.addEventListener('levelchange', updateBattery);
+        bm.addEventListener('chargingchange', updateBattery);
+      })
+      .catch(() => {
+        /* getBattery blocked or not supported */
+      });
+
+    return () => {
+      isMounted = false;
+      if (batteryManager) {
+        batteryManager.removeEventListener('levelchange', updateBattery);
+        batteryManager.removeEventListener('chargingchange', updateBattery);
+      }
+    };
+  }, []);
+
+  const isLowBattery = battery !== null && battery.level < 20;
   const mins = Math.max(1, Math.round(remainingDurationSeconds / 60));
 
   const cardStyle: React.CSSProperties = {
@@ -53,6 +101,44 @@ export const BottomNavHud: React.FC<BottomNavHudProps> = ({
     borderColor: nightMode ? '#525252' : '#cbd5e1',
     color: nightMode ? '#ffffff' : '#1e293b',
   };
+
+  const batteryBadge = battery ? (
+    <div
+      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-mono font-bold shrink-0 select-none transition-colors ${
+        isLowBattery ? 'animate-pulse' : ''
+      }`}
+      style={{
+        borderColor: isLowBattery ? '#ef4444' : (nightMode ? '#525252' : '#cbd5e1'),
+        color: isLowBattery ? '#ef4444' : (nightMode ? '#ffffff' : '#1e293b'),
+        background: isLowBattery
+          ? (nightMode ? 'rgba(239, 68, 68, 0.2)' : 'rgba(254, 226, 226, 0.85)')
+          : (nightMode ? '#1e1e1e' : '#f1f5f9'),
+      }}
+      title={`Battery: ${battery.level}%${battery.charging ? ' (Charging)' : ''}`}
+      aria-label={`Battery level ${battery.level} percent${battery.charging ? ', charging' : ''}`}
+    >
+      <div className="relative flex items-center">
+        <svg className="w-4 h-2.5 shrink-0" viewBox="0 0 24 14" fill="none">
+          <rect x="1" y="1" width="19" height="12" rx="2.5" stroke="currentColor" strokeWidth="2" />
+          <path d="M22 4.5v5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          <rect
+            x="3"
+            y="3"
+            width={`${Math.max(1.5, Math.min(15, (battery.level / 100) * 15))}`}
+            height="8"
+            rx="1"
+            fill="currentColor"
+          />
+        </svg>
+        {battery.charging && (
+          <span className="text-[10px] leading-none text-amber-500 ml-0.5" role="img" aria-label="Charging">
+            ⚡
+          </span>
+        )}
+      </div>
+      <span>{battery.level}%</span>
+    </div>
+  ) : null;
 
   return (
     <div className="fixed bottom-3 left-3 right-3 sm:left-6 sm:right-6 max-w-2xl mx-auto z-1000 select-none">
@@ -116,8 +202,10 @@ export const BottomNavHud: React.FC<BottomNavHudProps> = ({
               </div>
             </div>
 
-            {/* Right: Mute + Recenter + Day/Night */}
+            {/* Right: Battery + Mute + Recenter + Day/Night */}
             <div className="flex items-center gap-1.5 shrink-0">
+              {batteryBadge}
+
               <button
                 onClick={onToggleMute}
                 aria-label={isMuted ? 'Unmute voice' : 'Mute voice'}
@@ -194,8 +282,10 @@ export const BottomNavHud: React.FC<BottomNavHudProps> = ({
               </div>
             </button>
 
-            {/* Right: Day/Night toggle + Recenter button */}
+            {/* Right: Battery + Day/Night toggle + Recenter button */}
             <div className="flex items-center gap-1.5 shrink-0">
+              {batteryBadge}
+
               {onToggleNight && (
                 <button
                   onClick={onToggleNight}

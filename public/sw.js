@@ -1,4 +1,4 @@
-const VERSION = 'carnav-v1';
+const VERSION = 'clover-v2';
 const SHELL = VERSION + '-shell';
 const TILES = VERSION + '-tiles';
 const MAX_TILES = 1500;
@@ -29,11 +29,27 @@ self.addEventListener('fetch', (e) => {
   e.respondWith(shell(e));
 });
 
-// App files: serve the saved copy instantly, refresh it in the background
+// App files: network-first for HTML navigation so updates show instantly; cache-first for hashed bundles
 async function shell(e) {
   const req = e.request;
   const key = req.mode === 'navigate' ? '/' : req;
   const cache = await caches.open(SHELL);
+
+  if (req.mode === 'navigate') {
+    try {
+      const fresh = await fetch(req);
+      if (fresh && fresh.ok) {
+        cache.put(key, fresh.clone());
+        return fresh;
+      }
+    } catch {
+      // Offline fallback: serve cached index.html
+    }
+    const hit = await cache.match(key);
+    if (hit) return hit;
+    return new Response('Offline', { status: 503 });
+  }
+
   const hit = await cache.match(key);
   const net = fetch(req)
     .then((r) => {

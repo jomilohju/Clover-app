@@ -9,10 +9,13 @@ const getCartoKey = (): string => {
   return (import.meta as any).env?.VITE_CARTO_KEY || '';
 };
 
-// CARTO basemap tiles (Voyager for colorful day mode, dark_all for night mode)
+// Add ?lite=1 to the link for the lighter grey day map (smaller tiles) instead of colourful Voyager
+const LITE = typeof location !== 'undefined' && new URLSearchParams(location.search).get('lite') === '1';
+
+// CARTO basemap tiles (Voyager for colorful day mode, dark_all for night mode, light_all for lite mode)
 export const tileTemplate = (night: boolean) => {
   const key = getCartoKey();
-  const style = night ? 'dark_all' : 'voyager';
+  const style = night ? 'dark_all' : LITE ? 'light_all' : 'voyager';
   return `https://{s}.basemaps.cartocdn.com/rastertiles/${style}/{z}/{x}/{y}.png${
     key ? `?key=${key}` : ''
   }`;
@@ -26,11 +29,15 @@ function toTile(lat: number, lng: number, z: number) {
   return { x, y };
 }
 
-const MAX_PREFETCH = 250;
+const MAX_PREFETCH = 40; // small on purpose: slow data must stay free for the live map
 
-// Ask the service worker to save the tiles around the first part of the route (zoom 15 and 16, capped)
+// Ask the service worker to save the tiles around the first part of the route (zoom 16, capped)
 export function prefetchRouteTiles(coords: [number, number][], night: boolean) {
   if (!('serviceWorker' in navigator) || !navigator.onLine || coords.length === 0) return;
+  if ((navigator as any).connection?.saveData) return;
+  const conn = (navigator as any).connection;
+  if (conn && (conn.effectiveType !== '4g' || (conn.downlink && conn.downlink < 2))) return; // only on a fast connection
+
   const tpl = tileTemplate(night).replace('{s}', 'a');
   const seen = new Set<string>();
   const urls: string[] = [];
@@ -42,10 +49,14 @@ export function prefetchRouteTiles(coords: [number, number][], night: boolean) {
   };
   const step = Math.max(1, Math.floor(coords.length / 400));
   for (let i = 0; i < coords.length && urls.length < MAX_PREFETCH; i += step) {
-    for (const z of [16, 15]) {
+    for (const z of [16]) {
       const t = toTile(coords[i][0], coords[i][1], z);
       for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) add(z, t.x + dx, t.y + dy);
     }
   }
-  navigator.serviceWorker.ready.then((reg) => reg.active?.postMessage({ type: 'PREFETCH', urls })).catch(() => {});
+
+  // Wait so the route and the visible map tiles load first
+  setTimeout(() => {
+    navigator.serviceWorker.ready.then((reg) => reg.active?.postMessage({ type: 'PREFETCH', urls })).catch(() => {});
+  }, 10000);
 }

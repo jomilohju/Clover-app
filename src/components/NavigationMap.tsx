@@ -39,6 +39,55 @@ function dotIcon(className: string, size: number, bg: string) {
   });
 }
 
+// Red map pin, like the ones in Google and Apple Maps
+function pinIcon() {
+  return L.divIcon({
+    className: 'dest-marker',
+    iconSize: [36, 48],
+    iconAnchor: [18, 46],
+    html: '<svg width="36" height="48" viewBox="0 0 36 48"><path d="M18 1C9 1 2 8 2 17c0 12 16 29 16 29s16-17 16-29C34 8 27 1 18 1z" fill="#ea4335" stroke="#ffffff" stroke-width="3"/><circle cx="18" cy="17" r="6" fill="#ffffff"/></svg>',
+  });
+}
+
+// Thin the route line once (about 4 m tolerance) so each redraw touches far fewer points
+function simplifyRoute(c: [number, number][], tol = 0.00004): [number, number][] {
+  if (c.length < 3) return c;
+  const keep = new Uint8Array(c.length);
+  keep[0] = 1;
+  keep[c.length - 1] = 1;
+  const stack: [number, number][] = [[0, c.length - 1]];
+  const t2 = tol * tol;
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    const [ay, ax] = c[a];
+    const [by, bx] = c[b];
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    let maxD = 0;
+    let idx = -1;
+    for (let i = a + 1; i < b; i++) {
+      const [py, px] = c[i];
+      let d2: number;
+      if (len2 === 0) {
+        d2 = (px - ax) ** 2 + (py - ay) ** 2;
+      } else {
+        const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+        d2 = (px - (ax + t * dx)) ** 2 + (py - (ay + t * dy)) ** 2;
+      }
+      if (d2 > maxD) {
+        maxD = d2;
+        idx = i;
+      }
+    }
+    if (idx !== -1 && maxD > t2) {
+      keep[idx] = 1;
+      stack.push([a, idx], [idx, b]);
+    }
+  }
+  return c.filter((_, i) => keep[i] === 1);
+}
+
 function applyHeading(h: number | null | undefined) {
   const el = document.getElementById('car-arrow-wrap');
   if (el && h !== null && h !== undefined) el.style.transform = `rotate(${Math.round(h)}deg)`;
@@ -64,6 +113,7 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
   const routeLayersRef = useRef<L.Layer[]>([]);
   const turnMarkerRef = useRef<L.Marker | null>(null);
   const lastPanTimeRef = useRef(0);
+  const wasFollowingRef = useRef(true);
   const initialViewSetRef = useRef(false);
 
   // FIX: the map's event handlers are created once, so they must read the latest props from a ref.
@@ -75,7 +125,6 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     if (!mapContainerRef.current || mapRef.current) return;
     const lat = currentLocation ? currentLocation.lat : 6.5244;
     const lng = currentLocation ? currentLocation.lng : 3.3792;
-
     const map = L.map(mapContainerRef.current, {
       zoomControl: false,
       fadeAnimation: false,
@@ -107,7 +156,7 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     };
   }, []);
 
-  // Tiles: CARTO tiles (Voyager for day, Dark Matter for night)
+  // Tiles: pre-styled dark/light tiles instead of a CSS invert filter (much lighter to draw)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -119,11 +168,12 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
         maxZoom: 18,
         updateWhenIdle: true,
         updateWhenZooming: false,
-        keepBuffer: 2,
+        keepBuffer: 1,
         attribution:
           '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/attributions">CARTO</a>',
       }
     ).addTo(map);
+
     if (carMarkerRef.current) {
       carMarkerRef.current.setIcon(createCarIcon(nightMode));
       applyHeading(currentLocation?.heading);
@@ -149,10 +199,16 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     if (!initialViewSetRef.current) {
       initialViewSetRef.current = true;
       map.setView(ll, 16, { animate: false });
-    } else if (followCar && now - lastPanTimeRef.current > 1200) {
-      lastPanTimeRef.current = now;
-      map.panTo(ll, { animate: false });
+    } else if (followCar) {
+      // Lazy follow: move the map only when the car is far from the centre (far fewer redraws and tile loads)
+      const car = map.latLngToContainerPoint(ll);
+      const mid = map.getSize().divideBy(2);
+      if (!wasFollowingRef.current || car.distanceTo(mid) > 110) {
+        lastPanTimeRef.current = now;
+        map.panTo(ll, { animate: false });
+      }
     }
+    wasFollowingRef.current = followCar;
   }, [currentLocation, followCar]);
 
   useEffect(() => {
@@ -162,20 +218,21 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     routeLayersRef.current = [];
     if (!routeData || routeData.coordinates.length === 0) return;
 
-    // Route outline casing for contrast
-    const outline = L.polyline(routeData.coordinates, {
-      color: nightMode ? '#000000' : '#1557b0',
+    const pts = simplifyRoute(routeData.coordinates);
+
+    // smoothFactor thins the line while drawing, so long routes stay fast
+    const outline = L.polyline(pts, {
+      color: nightMode ? '#0b2a5e' : '#1b5fcf',
       weight: 12,
       opacity: 0.9,
       smoothFactor: 2,
       interactive: false,
     }).addTo(map);
 
-    // Active Navigation: #1A73E8 (High-saturation blue route line from post-2023 palette)
-    const line = L.polyline(routeData.coordinates, {
-      color: nightMode ? '#00e5ff' : '#1A73E8',
+    const line = L.polyline(pts, {
+      color: nightMode ? '#5b9cff' : '#4285f4',
       weight: 8,
-      opacity: 0.98,
+      opacity: 0.95,
       smoothFactor: 2,
       interactive: false,
     }).addTo(map);
@@ -183,7 +240,7 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     const [destLat, destLng] = routeData.destinationCoords;
     const dest = L.marker([destLat, destLng], {
       interactive: false,
-      icon: dotIcon('dest-marker', 32, '#EA4335'), // Google red
+      icon: pinIcon(),
     }).addTo(map);
     routeLayersRef.current = [outline, line, dest];
 
@@ -201,7 +258,7 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
       const [lon, lat] = currentStep.maneuver.location;
       turnMarkerRef.current = L.marker([lat, lon], {
         interactive: false,
-        icon: dotIcon('turn-dot', 24, '#1E8E3E'), // Google green
+        icon: dotIcon('turn-dot', 24, '#10b981'),
       }).addTo(map);
     }
   }, [currentStep]);
@@ -217,7 +274,7 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
 
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ background: '#0a0a0a' }}>
-      <div ref={mapContainerRef} className="absolute inset-0 z-0" style={{ background: '#171717' }} />
+      <div ref={mapContainerRef} className="absolute inset-0 z-0" style={{ background: nightMode ? '#171717' : '#ebe8e1' }} />
 
       {!hideControls && (
         <>
@@ -229,8 +286,8 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
           </div>
 
           <div className="absolute right-3 top-20 z-500 flex flex-col gap-1.5 select-none">
-            <button onClick={() => mapRef.current?.zoomIn()} aria-label="Zoom in" className="w-13 h-13 border-2 rounded-xl font-bold text-2xl flex items-center justify-center shadow-md active:scale-95 transition-transform" style={zoomBtn}>+</button>
-            <button onClick={() => mapRef.current?.zoomOut()} aria-label="Zoom out" className="w-13 h-13 border-2 rounded-xl font-bold text-2xl flex items-center justify-center shadow-md active:scale-95 transition-transform" style={zoomBtn}>−</button>
+            <button onClick={() => mapRef.current?.zoomIn()} aria-label="Zoom in" className="w-16 h-16 border-2 rounded-xl font-bold text-3xl flex items-center justify-center shadow-md active:scale-95 transition-transform" style={zoomBtn}>+</button>
+            <button onClick={() => mapRef.current?.zoomOut()} aria-label="Zoom out" className="w-16 h-16 border-2 rounded-xl font-bold text-3xl flex items-center justify-center shadow-md active:scale-95 transition-transform" style={zoomBtn}>−</button>
           </div>
         </>
       )}

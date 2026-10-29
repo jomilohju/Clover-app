@@ -49,30 +49,35 @@ async function shell(e) {
 }
 
 // Map tiles: saved copy first, then network. CORS fetch avoids oversized "opaque" cache entries.
+let corsBadUntil = 0;
 async function tile(req) {
   const key = canon(req.url);
   const cache = await caches.open(TILES);
   const hit = await cache.match(key);
   if (hit) return hit;
-  try {
-    const r = await fetch(key, { mode: 'cors', credentials: 'omit' });
-    if (r.ok) {
-      cache.put(key, r.clone());
-      trim(cache);
-    }
-    return r;
-  } catch (err) {
+  if (Date.now() >= corsBadUntil) {
     try {
-      return await fetch(req);
-    } catch (err2) {
-      return new Response('', { status: 504 });
+      const r = await fetch(key, { mode: 'cors', credentials: 'omit' });
+      if (r.ok) {
+        cache.put(key, r.clone());
+        trim(cache);
+      }
+      return r;
+    } catch (err) {
+      corsBadUntil = Date.now() + 5 * 60 * 1000; // if CORS fetches fail, stop retrying for 5 minutes (avoids double downloads)
     }
+  }
+  try {
+    return await fetch(req);
+  } catch (err2) {
+    return new Response('', { status: 504 });
   }
 }
 
 let trimming = false;
+let writes = 0;
 async function trim(cache) {
-  if (trimming) return;
+  if (trimming || ++writes % 40 !== 0) return; // listing the cache is slow on weak devices, so trim only every 40th write
   trimming = true;
   try {
     const keys = await cache.keys();
@@ -103,6 +108,6 @@ async function prefetch(urls) {
       }
     }
   }
-  await Promise.all([worker(), worker(), worker()]);
+  await worker();
   trim(cache);
 }

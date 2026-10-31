@@ -5,6 +5,9 @@ coverage/
 .DS_Store
 *.log
 .env*
+bun.lock*
+pnpm-lock.yaml
+yarn.lock
 
 # AI Studio system, temporary, and exported artifacts
 *aistudio*

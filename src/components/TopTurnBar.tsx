@@ -16,7 +16,7 @@ interface TopTurnBarProps {
   nightMode?: boolean;
 }
 
-export const TopTurnBar: React.FC<TopTurnBarProps> = ({
+export const TopTurnBar: React.FC<TopTurnBarProps> = React.memo(({
   distanceToTurn,
   currentStep,
   upcomingStep,
@@ -196,4 +196,4 @@ export const TopTurnBar: React.FC<TopTurnBarProps> = ({
       </div>
     </header>
   );
-};
+});

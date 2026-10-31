@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { GeoLocation, RouteData, RouteStep } from './types/navigation';
 import { NavigationMap } from './components/NavigationMap';
 import { TopTurnBar } from './components/TopTurnBar';
@@ -13,21 +13,13 @@ import { WelcomeScreen } from './components/WelcomeScreen';
 import { HistoryModal } from './components/HistoryModal';
 import { fetchRoute } from './services/routing';
 import { voiceGuidance } from './services/voiceGuidance';
-import { haversineDistance, isOffRoute, getVoiceAnnouncement, getInstructionText } from './utils/navigation';
+import { haversineDistance, isOffRoute, getVoiceAnnouncement, getInstructionText, buildRouteIndex, locateOnRoute } from './utils/navigation';
 import { prefetchRouteTiles } from './utils/tileCache';
 import { loadTripHistory, recordCompletedTrip, deleteTripFromHistory, clearTripHistory } from './utils/tripHistory';
 import { CompletedTrip } from './types/navigation';
 
 type Timer = ReturnType<typeof setTimeout>;
 const isNightNow = () => { const h = new Date().getHours(); return h >= 18 || h < 6; };
-const nearestIdx = (coords: [number, number][], lat: number, lng: number) => {
-  let best = 0, bestD = Infinity;
-  for (let i = 0; i < coords.length; i++) {
-    const d = (coords[i][0] - lat) ** 2 + (coords[i][1] - lng) ** 2;
-    if (d < bestD) { bestD = d; best = i; }
-  }
-  return best;
-};
 // Open the app with ?debug=1 to show the bench-test buttons
 const DEBUG = new URLSearchParams(window.location.search).get('debug') === '1';
 const dbgBtn: React.CSSProperties = { background: '#c026d3', color: '#fff', fontWeight: 700, padding: '10px 14px', borderRadius: 10 };
@@ -67,7 +59,6 @@ export default function App() {
   const [tripHistory, setTripHistory] = useState<CompletedTrip[]>(() => loadTripHistory());
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const needsRerouteRef = useRef(false);
-  const restoredRef = useRef(false);
   const hasDepartedRef = useRef(false);
 
   const toastTimerRef = useRef<Timer | null>(null);
@@ -77,6 +68,7 @@ export default function App() {
   const isReroutingRef = useRef(false);
   const lastRerouteRef = useRef(0);
   const lastEvalLocRef = useRef<GeoLocation | null>(null);
+  const hintSegRef = useRef(0);
   const lastMilestoneRef = useRef<number | null>(null);
   const lastStepIndexRef = useRef(0);
   const autoRecenterTimerRef = useRef<Timer | null>(null);
@@ -188,29 +180,48 @@ export default function App() {
     }
   };
 
+  // Cumulative distances and maneuver positions are computed once per route, not on every GPS fix
+  const routeIndex = useMemo(
+    () =>
+      routeData && routeData.coordinates.length > 1
+        ? buildRouteIndex(routeData.coordinates, routeData.steps || [])
+        : null,
+    [routeData]
+  );
+  useEffect(() => {
+    hintSegRef.current = 0;
+  }, [routeData]);
+
   const updateNavigationProgress = useCallback(
     (loc: GeoLocation, route: RouteData, stepIdx: number) => {
       if (!route.steps || route.steps.length === 0) return;
       const currentStep = route.steps[stepIdx];
       if (!currentStep) return;
 
-      // Ground distance to the actual destination coordinates
+      const lastIdx = route.steps.length - 1;
       const [destLat, destLng] = route.destinationCoords;
       const distToDest = haversineDistance(loc.lat, loc.lng, destLat, destLng);
 
-      // Upcoming maneuver target:
-      // While on step i, the driver is approaching step i+1's turn maneuver location.
-      // If on the final step, the driver is approaching the destination coordinates.
-      const nextStep = route.steps[stepIdx + 1];
-      let targetLat = destLat;
-      let targetLng = destLng;
-      if (nextStep && nextStep.maneuver && nextStep.maneuver.location) {
-        targetLng = nextStep.maneuver.location[0];
-        targetLat = nextStep.maneuver.location[1];
-      }
+      // Where is the car on the route line? (short local search, full scan only when far from it)
+      const here = routeIndex ? locateOnRoute(route.coordinates, routeIndex, loc, hintSegRef.current) : null;
+      if (here) hintSegRef.current = here.seg;
+      const along = routeIndex && here && here.dist <= 60 ? here.along : null; // null = off the line, use straight-line fallbacks
 
-      const distToTurn = haversineDistance(loc.lat, loc.lng, targetLat, targetLng);
-      setDistanceToTurn(distToTurn);
+      // Distance to the upcoming maneuver (the next step's start, or the destination on the final step)
+      const nextStep = route.steps[stepIdx + 1];
+      let distToTurn: number;
+      if (routeIndex && along !== null) {
+        distToTurn = Math.max(0, routeIndex.cum[routeIndex.stepCoordIdx[Math.min(stepIdx + 1, lastIdx)]] - along);
+      } else {
+        let targetLat = destLat;
+        let targetLng = destLng;
+        if (nextStep && nextStep.maneuver && nextStep.maneuver.location) {
+          targetLng = nextStep.maneuver.location[0];
+          targetLat = nextStep.maneuver.location[1];
+        }
+        distToTurn = haversineDistance(loc.lat, loc.lng, targetLat, targetLng);
+      }
+      setDistanceToTurn(Math.round(distToTurn / 5) * 5); // rounded so the HUD only redraws when the shown value can change
 
       // Track departure: car must depart from the starting coordinate
       if (!hasDepartedRef.current && route.coordinates.length > 0) {
@@ -221,16 +232,29 @@ export default function App() {
         }
       }
 
-      // Advance to the next maneuver when within 30m of the upcoming turn
-      if (distToTurn < 30 && stepIdx < route.steps.length - 1) {
-        setCurrentStepIndex(stepIdx + 1);
-        lastStepIndexRef.current = stepIdx + 1;
-        lastMilestoneRef.current = null;
-        return;
+      // Advance when the upcoming maneuver is reached OR already passed along the route line.
+      // Position along the line cannot be skipped by a fast car between two GPS fixes.
+      if (stepIdx < lastIdx) {
+        let next = stepIdx;
+        if (routeIndex && along !== null) {
+          while (next < lastIdx) {
+            const remaining = routeIndex.cum[routeIndex.stepCoordIdx[next + 1]] - along;
+            if (remaining < (next === stepIdx ? 25 : 0)) next++; // extra steps only once truly passed
+            else break;
+          }
+        } else if (distToTurn < 30) {
+          next = stepIdx + 1;
+        }
+        if (next !== stepIdx) {
+          setCurrentStepIndex(next);
+          lastStepIndexRef.current = next;
+          lastMilestoneRef.current = null;
+          return;
+        }
       }
 
       // Arrival check: NEVER trigger arrival until the vehicle has actually departed the start point
-      const isFinalStep = stepIdx >= route.steps.length - 1;
+      const isFinalStep = stepIdx >= lastIdx;
       const canTriggerArrival = hasDepartedRef.current && isFinalStep && distToDest <= 30;
 
       if (canTriggerArrival) {
@@ -253,24 +277,34 @@ export default function App() {
         voiceGuidance.speak(voiceAlert.text);
       }
 
-      // FIX: start at stepIdx so the leg after the upcoming turn is counted
-      let sumDistance = distToTurn;
-      let sumDuration = 0;
-      for (let i = stepIdx; i < route.steps.length; i++) {
-        sumDistance += route.steps[i].distance;
-        sumDuration += route.steps[i].duration;
+      // Remaining distance and time
+      let remDist: number;
+      let remDur: number;
+      if (routeIndex && along !== null && routeIndex.total > 0) {
+        remDist = Math.max(0, routeIndex.total - along);
+        remDur = route.duration * (remDist / routeIndex.total);
+      } else {
+        // The current step is already covered by distToTurn, so sum only the steps AFTER it
+        remDist = distToTurn;
+        remDur = 0;
+        for (let i = stepIdx + 1; i < route.steps.length; i++) {
+          remDist += route.steps[i].distance;
+          remDur += route.steps[i].duration;
+        }
       }
-      setRemainingDistance(sumDistance);
-      const remainingSeconds = Math.max(30, Math.round(sumDuration));
-      setRemainingDuration(remainingSeconds);
-      setEta(new Date(Date.now() + remainingSeconds * 1000));
+      const remSeconds = Math.max(30, Math.round(remDur / 10) * 10);
+      setRemainingDistance(Math.round(remDist / 10) * 10);
+      setRemainingDuration(remSeconds);
+      const etaNow = new Date(Date.now() + remSeconds * 1000);
+      setEta((prev) => (prev && Math.abs(prev.getTime() - etaNow.getTime()) < 30000 ? prev : etaNow)); // keep the same Date unless it moved by 30 s+
 
-      // FIX: only count new GPS fixes, scale the threshold with accuracy, add a reroute cooldown
+      // Off-route: only count new GPS fixes, scale the threshold with accuracy, add a reroute cooldown
       if (route.coordinates.length > 2 && !isReroutingRef.current) {
         const isNewFix = lastEvalLocRef.current !== loc;
         lastEvalLocRef.current = loc;
         const threshold = Math.max(45, (loc.accuracy || 10) * 2);
-        if (isOffRoute(loc, route.coordinates, threshold)) {
+        const off = here ? here.dist > threshold : isOffRoute(loc, route.coordinates, threshold);
+        if (off) {
           if (isNewFix) offRouteCountRef.current += 1;
           if (offRouteCountRef.current >= 3 && Date.now() - lastRerouteRef.current > 15000) {
             setIsOffRouteState(true);
@@ -282,7 +316,7 @@ export default function App() {
         }
       }
     },
-    [hasArrived]
+    [hasArrived, routeIndex]
   );
 
   useEffect(() => {
@@ -296,15 +330,6 @@ export default function App() {
       triggerReroute(currentLocation, routeData);
     }
   }, [online]);
-
-  // Save the route so a reloaded browser tab can pick up where it left off
-  useEffect(() => {
-    if (!isNavigating || !routeData) return;
-    try {
-      const slim = { ...routeData, steps: routeData.steps.map(({ geometry, ...s }) => s) };
-      localStorage.setItem('carnav_route', JSON.stringify(slim));
-    } catch { /* storage full or blocked */ }
-  }, [isNavigating, routeData]);
 
   // On fresh app launch, clear any leftover partial route from earlier sessions
   // so the Welcome Screen is always displayed cleanly on entry
@@ -351,7 +376,7 @@ export default function App() {
     }
   };
 
-  const handleEndRoute = () => {
+  const handleEndRoute = useCallback(() => {
     if (simTimerRef.current) { clearInterval(simTimerRef.current); simTimerRef.current = null; }
     setIsSimulating(false);
     setIsNavigating(false);
@@ -362,11 +387,11 @@ export default function App() {
     setFollowCar(true);
     try { localStorage.removeItem('carnav_route'); } catch { /* ignore */ }
     voiceGuidance.speak('Route ended.');
-  };
+  }, []);
 
-  const handleToggleMute = () => setIsMuted(voiceGuidance.toggleMute());
-  const handleTestVoice = () => voiceGuidance.testVoice();
-  const handleToggleNight = () => {
+  const handleToggleMute = useCallback(() => setIsMuted(voiceGuidance.toggleMute()), []);
+  const handleTestVoice = useCallback(() => voiceGuidance.testVoice(), []);
+  const handleToggleNight = useCallback(() => {
     setNightMode((prev) => {
       const next = !prev;
       try {
@@ -374,7 +399,7 @@ export default function App() {
       } catch { /* ignore */ }
       return next;
     });
-  };
+  }, []);
 
   // FIX: uses speedRef (current speed), not the speed from when the map was touched
   const handleUserMapInteraction = useCallback(() => {
@@ -385,7 +410,11 @@ export default function App() {
     }, 12000);
   }, []);
 
-  const handleRecenter = () => setFollowCar(true);
+  const handleRecenter = useCallback(() => setFollowCar(true), []);
+  const handleSearchOpen = useCallback(() => setSearchSignal((n) => n + 1), []);
+  const handleStartPin = useCallback(() => setIsPinMode(true), []);
+  const handleOpenHistory = useCallback(() => setIsHistoryOpen(true), []);
+  const handlePinCenterChange = useCallback((lat: number, lng: number) => setPinCenter({ lat, lng }), []);
 
   // Bench-test drive (shown with ?debug=1)
   const handleToggleSimulation = () => {
@@ -435,7 +464,7 @@ export default function App() {
   const banner = [gpsMessage && !isSimulating ? gpsMessage : null, !online ? 'No data. Guidance continues on your saved route.' : null].filter(Boolean).join('   |   ');
   const currentStep: RouteStep | null = routeData?.steps?.[currentStepIndex] ?? null;
   const upcomingStep: RouteStep | null = routeData?.steps?.[currentStepIndex + 1] ?? null;
-  const speedKmh = (currentLocation.speed || 0) * 3.6;
+  const speedKmh = Math.round((currentLocation.speed || 0) * 3.6); // whole km/h: it is shown rounded anyway, and stable props let the HUD skip redraws
 
   return (
     <div className={`relative w-screen h-screen overflow-hidden select-none font-sans ${nightMode ? 'bg-black text-white' : 'bg-slate-100 text-slate-900'}`}>
@@ -497,8 +526,8 @@ export default function App() {
           followCar={followCar}
           isPinMode={isPinMode}
           onUserMapInteraction={handleUserMapInteraction}
-          onMapCenterChange={(lat, lng) => setPinCenter({ lat, lng })}
-          gpsAccuracy={currentLocation.accuracy}
+          onMapCenterChange={handlePinCenterChange}
+          gpsAccuracy={Math.round(currentLocation.accuracy ?? 10)}
           speedKmh={speedKmh}
           hideControls={viewMode === 'welcome'}
         />
@@ -523,9 +552,9 @@ export default function App() {
           followCar={followCar}
           isMuted={isMuted}
           destinationName={routeData?.destinationName}
-          onSearch={() => setSearchSignal((n) => n + 1)}
-          onStartPinMode={() => setIsPinMode(true)}
-          onOpenHistory={() => setIsHistoryOpen(true)}
+          onSearch={handleSearchOpen}
+          onStartPinMode={handleStartPin}
+          onOpenHistory={handleOpenHistory}
           onToggleNight={handleToggleNight}
           onToggleMute={handleToggleMute}
           onEndRoute={handleEndRoute}

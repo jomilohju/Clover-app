@@ -312,3 +312,124 @@ export function getVoiceAnnouncement(
 
   return null;
 }
+
+/* ------------------------------------------------------------------ */
+/* Along-route progress tracking                                       */
+/* ------------------------------------------------------------------ */
+
+const METERS_PER_DEG = (Math.PI / 180) * EARTH_RADIUS_METERS;
+
+export interface RouteIndex {
+  /** Cumulative metres along the route at every coordinate */
+  cum: Float64Array;
+  /** Total route length in metres */
+  total: number;
+  /** For every step, the coordinate index where its maneuver happens */
+  stepCoordIdx: number[];
+}
+
+export interface RouteLocation {
+  /** Index of the nearest route segment */
+  seg: number;
+  /** Metres travelled along the route up to the nearest point */
+  along: number;
+  /** Straight-line distance from the point to the route, in metres */
+  dist: number;
+}
+
+/**
+ * Pre-computes cumulative distances and the coordinate index of every maneuver.
+ * Done once per route so each GPS fix only needs a short local search.
+ */
+export function buildRouteIndex(coords: [number, number][], steps: RouteStep[]): RouteIndex {
+  const cum = new Float64Array(coords.length);
+  for (let i = 1; i < coords.length; i++) {
+    cum[i] = cum[i - 1] + haversineDistance(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
+  }
+
+  const stepCoordIdx: number[] = [];
+  let from = 0;
+  for (let s = 0; s < steps.length; s++) {
+    const loc = steps[s].maneuver.location; // [lon, lat]
+    let best = from;
+    let bestD = Infinity;
+    for (let i = from; i < coords.length; i++) {
+      const d = (coords[i][0] - loc[1]) ** 2 + (coords[i][1] - loc[0]) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+        if (d < 2e-10) break; // ~1.5 m: the first match going forward wins, so loops stay in order
+      }
+    }
+    stepCoordIdx.push(best);
+    from = best;
+  }
+  // The last step is the arrival: pin it to the end of the line
+  if (steps.length > 0 && coords.length > 0) stepCoordIdx[steps.length - 1] = coords.length - 1;
+
+  return { cum, total: coords.length > 0 ? cum[coords.length - 1] : 0, stepCoordIdx };
+}
+
+function scanSegments(
+  coords: [number, number][],
+  lat: number,
+  lng: number,
+  lo: number,
+  hi: number
+): { seg: number; t: number; dist: number } {
+  const kx = METERS_PER_DEG * Math.cos((lat * Math.PI) / 180);
+  const ky = METERS_PER_DEG;
+  let best = Infinity;
+  let bestSeg = lo;
+  let bestT = 0;
+  for (let i = lo; i < hi; i++) {
+    // Work in metres with the point at the origin: one multiply per axis, no trig per segment
+    const ax = (coords[i][1] - lng) * kx;
+    const ay = (coords[i][0] - lat) * ky;
+    const dx = (coords[i + 1][1] - lng) * kx - ax;
+    const dy = (coords[i + 1][0] - lat) * ky - ay;
+    const len2 = dx * dx + dy * dy;
+    let t = len2 === 0 ? 0 : -(ax * dx + ay * dy) / len2;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const px = ax + t * dx;
+    const py = ay + t * dy;
+    const d2 = px * px + py * py;
+    if (d2 < best) {
+      best = d2;
+      bestSeg = i;
+      bestT = t;
+    }
+  }
+  return { seg: bestSeg, t: bestT, dist: Math.sqrt(best) };
+}
+
+/**
+ * Finds where a point sits on the route. Searches a small window around the last
+ * known segment first (cheap), and only scans the whole line when the point is
+ * far from that window (off route, or the GPS jumped).
+ */
+export function locateOnRoute(
+  coords: [number, number][],
+  index: RouteIndex,
+  point: { lat: number; lng: number },
+  hintSeg = 0,
+  back = 10,
+  ahead = 80,
+  trustMeters = 40
+): RouteLocation | null {
+  const segCount = coords.length - 1;
+  if (segCount < 1) return null;
+
+  const hint = Math.max(0, Math.min(hintSeg, segCount - 1));
+  const lo = Math.max(0, hint - back);
+  const hi = Math.min(segCount, hint + ahead);
+  let r = scanSegments(coords, point.lat, point.lng, lo, hi);
+
+  if (r.dist > trustMeters && (lo > 0 || hi < segCount)) {
+    const full = scanSegments(coords, point.lat, point.lng, 0, segCount);
+    if (full.dist < r.dist) r = full;
+  }
+
+  const segLen = index.cum[r.seg + 1] - index.cum[r.seg];
+  return { seg: r.seg, along: index.cum[r.seg] + r.t * segLen, dist: r.dist };
+}

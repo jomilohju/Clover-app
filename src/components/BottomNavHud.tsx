@@ -22,7 +22,7 @@ interface BottomNavHudProps {
 const two = (n: number) => (n < 10 ? '0' + n : '' + n);
 const fmtDist = (m: number) => (m < 1000 ? Math.round(m / 10) * 10 + ' m' : (m / 1000).toFixed(1) + ' km');
 
-export const BottomNavHud: React.FC<BottomNavHudProps> = ({
+export const BottomNavHud: React.FC<BottomNavHudProps> = React.memo(({
   isNavigating,
   speedKmh,
   remainingDistanceMeters,
@@ -313,4 +313,4 @@ export const BottomNavHud: React.FC<BottomNavHudProps> = ({
       </div>
     </div>
   );
-};
+});

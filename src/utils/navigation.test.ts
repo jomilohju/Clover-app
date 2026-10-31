@@ -11,6 +11,8 @@ import {
   formatEta,
   getManeuverIconType,
   getVoiceAnnouncement,
+  buildRouteIndex,
+  locateOnRoute,
 } from './navigation';
 import { formatTripDate } from './tripHistory';
 import { RouteStep } from '../types/navigation';
@@ -129,3 +131,57 @@ test('formatTripDate accurately labels today and recent timestamps', () => {
 });
 
 
+
+
+// ---- along-route tracking -------------------------------------------------
+
+function makeStraightRoute() {
+  // ~2.2 km due north along one meridian, a vertex every 0.001 degrees
+  const coords: [number, number][] = [];
+  for (let i = 0; i <= 20; i++) coords.push([6.5 + i * 0.001, 3.35]);
+  const mk = (idx: number, type: string): RouteStep => ({
+    distance: 0,
+    duration: 0,
+    name: 'Test Rd',
+    maneuver: { type, location: [3.35, coords[idx][0]] },
+  });
+  const steps = [mk(0, 'depart'), mk(10, 'turn'), mk(20, 'arrive')];
+  return { coords, steps };
+}
+
+test('buildRouteIndex maps maneuvers to coordinate indexes and pins arrival to the end', () => {
+  const { coords, steps } = makeStraightRoute();
+  const idx = buildRouteIndex(coords, steps);
+  assert.deepEqual(idx.stepCoordIdx, [0, 10, 20]);
+  assert.ok(Math.abs(idx.total - 2224) < 20, `Expected ~2.2 km, got ${idx.total}`);
+});
+
+test('locateOnRoute returns metres along the route and distance from it', () => {
+  const { coords, steps } = makeStraightRoute();
+  const idx = buildRouteIndex(coords, steps);
+  const r = locateOnRoute(coords, idx, { lat: 6.505, lng: 3.35 }, 0)!;
+  assert.ok(Math.abs(r.along - idx.cum[5]) < 2, `along ${r.along} vs ${idx.cum[5]}`);
+  assert.ok(r.dist < 1);
+  const off = locateOnRoute(coords, idx, { lat: 6.505, lng: 3.3515 }, 0)!; // ~165 m east
+  assert.ok(off.dist > 150 && off.dist < 180, `Expected ~165 m, got ${off.dist}`);
+});
+
+test('locateOnRoute falls back to a full scan when the hint window is wrong', () => {
+  const { coords, steps } = makeStraightRoute();
+  const idx = buildRouteIndex(coords, steps);
+  // Hint says segment 0, but the car is near the far end: window misses it, full scan must find it
+  const r = locateOnRoute(coords, idx, { lat: 6.5195, lng: 3.35 }, 0)!;
+  assert.ok(r.dist < 1, `Expected to find the real position, dist ${r.dist}`);
+  assert.equal(r.seg, 19);
+});
+
+test('a fast car that jumps past a maneuver is detected by along-route position', () => {
+  const { coords, steps } = makeStraightRoute();
+  const idx = buildRouteIndex(coords, steps);
+  // Maneuver 1 is at coord 10. Car jumps from 60 m before it to 60 m after it between two fixes:
+  const before = locateOnRoute(coords, idx, { lat: 6.5095, lng: 3.35 }, 0)!;
+  const after = locateOnRoute(coords, idx, { lat: 6.5105, lng: 3.35 }, before.seg)!;
+  const turnAlong = idx.cum[idx.stepCoordIdx[1]];
+  assert.ok(turnAlong - before.along > 25, 'before: not yet within the 25 m trigger');
+  assert.ok(turnAlong - after.along < 0, 'after: maneuver is behind the car, step must advance');
+});
